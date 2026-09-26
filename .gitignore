@@ -1,5 +1,6 @@
 # eBPF 生成物中的大文件不忽略（提交 *_bpfel.go 与 *.o），但 vmlinux.h 由 VPS 生成
 bpf/vmlinux.h
-knokd
-knok
-dist/
+# 构建产物只在仓库根：锚定 '/'，否则会连 cmd/knok、cmd/knokd 源码目录一起忽略
+/knokd
+/knok
+/dist/
