@@ -17,14 +17,14 @@ all: vet corelint test
 vet:
 	@dirs=""; \
 	[ -d pkg ] && dirs="$$dirs ./pkg/..."; \
-	[ -d internal/core ] && dirs="$$dirs ./internal/core/"; \
+	[ -d internal/core ] && dirs="$$dirs ./internal/core/..."; \
 	if [ -z "$$dirs" ]; then echo "vet: no Go packages yet, nothing to vet"; \
 	else $(GO) vet ./...; fi
 
 test:
 	@dirs=""; \
 	[ -d pkg ] && dirs="$$dirs ./pkg/..."; \
-	[ -d internal/core ] && dirs="$$dirs ./internal/core/"; \
+	[ -d internal/core ] && dirs="$$dirs ./internal/core/..."; \
 	if [ -z "$$dirs" ]; then echo "test: no Go packages yet, nothing to test"; \
 	else $(GO) test $$dirs; fi
 
@@ -43,7 +43,7 @@ bpf/vmlinux.h:
 integration:
 	@dirs=""; \
 	[ -d pkg ] && dirs="$$dirs ./pkg/..."; \
-	[ -d internal/core ] && dirs="$$dirs ./internal/core/"; \
+	[ -d internal/core ] && dirs="$$dirs ./internal/core/..."; \
 	if [ -z "$$dirs" ]; then echo "integration: no Go packages yet, nothing to test"; \
 	else $(GO) test -tags=integration -count=1 ./...; fi
 
