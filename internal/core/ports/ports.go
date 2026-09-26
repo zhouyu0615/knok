@@ -39,6 +39,12 @@ type PacketSource interface {
 	Close() error
 }
 
+// Allowlist 管理 (IP, port) 授权。
+//
+// 过期约定（所有实现必须一致）：一条授权严格存活到它的过期时刻之前——即带 TTL 的
+// 条目仅在 now < ExpiresAt 时算存活，当 now == ExpiresAt 时即视为已过期；
+// Forever 条目不参与该判断，永不失效。
+// 该约定与 eBPF 数据面的判断（*expiry > bpf_ktime_get_ns()）一致。
 type Allowlist interface {
 	Grant(ip netip.Addr, port uint16, ttl time.Duration) error
 	GrantForever(ip netip.Addr, port uint16) error

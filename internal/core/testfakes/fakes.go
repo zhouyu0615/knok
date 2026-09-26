@@ -61,7 +61,7 @@ func (m *MemAllowlist) List() ([]ports.Entry, error) {
 	out := make([]ports.Entry, 0, len(m.entries))
 	now := m.now.Now()
 	for k, e := range m.entries {
-		if !e.Forever && e.ExpiresAt.Before(now) {
+		if !e.Forever && !e.ExpiresAt.After(now) {
 			delete(m.entries, k) // 惰性过期
 			continue
 		}
