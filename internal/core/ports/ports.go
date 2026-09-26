@@ -17,7 +17,8 @@ type CandidatePacket struct {
 }
 
 // Decision 是验证管线的输出。RejectReason 取值：
-// "" | bad_packet | auth_failed | clock_skew | replay | policy
+// "" | bad_packet | auth_failed | clock_skew | replay | policy | grant_failed
+// （grant_failed 表示包已通过全部验证、但把授权写入数据面失败，此时 Allowed 被置为 false。）
 type Decision struct {
 	Allowed      bool
 	SrcIP        netip.Addr
