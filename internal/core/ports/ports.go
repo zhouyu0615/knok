@@ -18,7 +18,11 @@ type CandidatePacket struct {
 
 // Decision 是验证管线的输出。RejectReason 取值：
 // "" | bad_packet | auth_failed | clock_skew | replay | policy | grant_failed
-// （grant_failed 表示包已通过全部验证、但把授权写入数据面失败，此时 Allowed 被置为 false。）
+//
+// grant_failed 契约：包已通过全部验证，但把某个端口写入数据面失败。此时 Allowed 被置为
+// false，Ports 是**本次评估中实际已成功授权的端口子集**（可能为空；为空时是非 nil 空切片），
+// 且失败端口之后不再尝试授权任何端口。已成功的授权不会被回滚——它可能来自同一客户端早先的
+// 包，回滚会误伤那一条。其余 reject 原因下 Ports 无意义。
 type Decision struct {
 	Allowed      bool
 	SrcIP        netip.Addr

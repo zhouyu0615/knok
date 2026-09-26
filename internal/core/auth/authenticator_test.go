@@ -1,10 +1,13 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -164,6 +167,180 @@ func TestAuthenticatorRejectGrantsNothing(t *testing.T) {
 	if n := len(sink.snapshot()); n != 1 {
 		t.Fatalf("expected exactly 1 audit event, got %d", n)
 	}
+}
+
+// TestAuthenticatorReportsPartialGrantTruthfully 验证：多端口请求中某个端口 Grant 失败时，
+// 决策必须真实反映"部分授权"——停止后续端口、Ports 收敛为本次实际授权的子集、审计仍恰好一条
+// 且携带该子集。不回滚已成功端口（可能来自同一客户端早先的包）。
+func TestAuthenticatorReportsPartialGrantTruthfully(t *testing.T) {
+	clock := testfakes.NewFakeClock(baseTime)
+	src := testfakes.NewChanSource(4)
+	sink := &recorder{}
+	al := &countingAllowlist{failPort: 23, err: errors.New("map update failed")}
+	pipe := auth.NewPipeline(auth.Config{PSK: psk, AllowedPorts: []uint16{22, 23, 24},
+		MaxTTL: 30 * time.Minute, TSWindow: 300 * time.Second}, clock)
+	a := auth.NewAuthenticator(src, pipe, al, sink)
+
+	m := validMsg(11)
+	m.Ports = []uint16{22, 23, 24}
+	raw, err := protocol.EncodePSK(m, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.Send(candidate(raw, 4242))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	ev := sink.waitFor(t, 1)
+
+	// 1) 失败端口之后的端口不再尝试授权；失败端口本身被尝试过。
+	if got := al.attempts(); !slices.Equal(got, []uint16{22, 23}) {
+		t.Fatalf("expected attempts [22 23] (stop at first failure), got %v", got)
+	}
+	// 2) 决策真实：拒绝 + grant_failed + 仅含实际授权的子集。
+	if ev[0].d.Allowed || ev[0].d.RejectReason != "grant_failed" {
+		t.Fatalf("expected grant_failed reject, got %+v", ev[0].d)
+	}
+	if !slices.Equal(ev[0].d.Ports, []uint16{22}) {
+		t.Fatalf("expected decision ports to be the granted subset [22], got %v", ev[0].d.Ports)
+	}
+	if got := al.grantedPorts(); !slices.Equal(got, []uint16{22}) {
+		t.Fatalf("expected only port 22 granted, got %v", got)
+	}
+	if got := al.revoked(); len(got) != 0 {
+		t.Fatalf("granted ports must not be rolled back, got revokes %v", got)
+	}
+
+	cancel()
+	src.Close()
+	<-done
+
+	// 3) 恰好一条 audit 事件，且它携带实际授权的子集。
+	if n := len(sink.snapshot()); n != 1 {
+		t.Fatalf("expected exactly 1 audit event, got %d", n)
+	}
+}
+
+// TestAuthenticatorFirstPortGrantFailureReportsEmptySubset 验证：首个端口就失败时，
+// Ports 是空切片（非 nil 语义歧义）——拒绝且没有端口被打开。
+func TestAuthenticatorFirstPortGrantFailureReportsEmptySubset(t *testing.T) {
+	clock := testfakes.NewFakeClock(baseTime)
+	src := testfakes.NewChanSource(4)
+	sink := &recorder{}
+	al := &countingAllowlist{failPort: 22, err: errors.New("map update failed")}
+	pipe := auth.NewPipeline(auth.Config{PSK: psk, AllowedPorts: []uint16{22, 23},
+		MaxTTL: 30 * time.Minute, TSWindow: 300 * time.Second}, clock)
+	a := auth.NewAuthenticator(src, pipe, al, sink)
+
+	m := validMsg(12)
+	m.Ports = []uint16{22, 23}
+	raw, err := protocol.EncodePSK(m, psk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.Send(candidate(raw, 4242))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+
+	ev := sink.waitFor(t, 1)
+	if ev[0].d.Allowed || ev[0].d.RejectReason != "grant_failed" {
+		t.Fatalf("expected grant_failed reject, got %+v", ev[0].d)
+	}
+	if ev[0].d.Ports == nil || len(ev[0].d.Ports) != 0 {
+		t.Fatalf("expected non-nil empty granted subset, got %#v", ev[0].d.Ports)
+	}
+	if got := al.attempts(); !slices.Equal(got, []uint16{22}) {
+		t.Fatalf("expected attempts [22] only, got %v", got)
+	}
+
+	cancel()
+	src.Close()
+	<-done
+}
+
+// TestLogAuditSinkPartialGrantVisibility 验证：grant_failed 的 spa_reject 行携带
+// granted_ports 属性（部分授权对运维可见）；无授权子集的普通拒绝不带该属性。
+func TestLogAuditSinkPartialGrantVisibility(t *testing.T) {
+	var buf bytes.Buffer
+	sink := auth.LogAuditSink{Logger: slog.New(slog.NewJSONHandler(&buf, nil))}
+	pkt := candidate([]byte("x"), 4242)
+
+	sink.Emit(ports.Decision{RejectReason: "grant_failed", Ports: []uint16{22}}, pkt)
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("expected JSON log line, got %q: %v", buf.String(), err)
+	}
+	if rec["msg"] != "spa_reject" || rec["reason"] != "grant_failed" {
+		t.Fatalf("expected spa_reject/grant_failed, got %v", rec)
+	}
+	got, ok := rec["granted_ports"].([]any)
+	if !ok || len(got) != 1 || got[0].(float64) != 22 {
+		t.Fatalf("expected granted_ports [22] on the reject line, got %v", rec["granted_ports"])
+	}
+
+	buf.Reset()
+	sink.Emit(ports.Decision{RejectReason: "bad_packet"}, pkt)
+	rec = map[string]any{}
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := rec["granted_ports"]; present {
+		t.Fatalf("reject without granted subset must not carry granted_ports, got %v", rec)
+	}
+}
+
+// countingAllowlist 记录 Grant 尝试与成功端口，并对指定端口返回错误。
+type countingAllowlist struct {
+	mu        sync.Mutex
+	failPort  uint16
+	err       error
+	attempted []uint16
+	granted   []uint16
+	revokes   []uint16
+}
+
+func (c *countingAllowlist) Grant(_ netip.Addr, port uint16, _ time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.attempted = append(c.attempted, port)
+	if port == c.failPort {
+		return c.err
+	}
+	c.granted = append(c.granted, port)
+	return nil
+}
+
+func (c *countingAllowlist) GrantForever(netip.Addr, uint16) error { return nil }
+
+func (c *countingAllowlist) Revoke(_ netip.Addr, port uint16) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.revokes = append(c.revokes, port)
+	return nil
+}
+
+func (c *countingAllowlist) List() ([]ports.Entry, error) { return nil, nil }
+
+func (c *countingAllowlist) attempts() []uint16 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]uint16(nil), c.attempted...)
+}
+
+func (c *countingAllowlist) grantedPorts() []uint16 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]uint16(nil), c.granted...)
+}
+
+func (c *countingAllowlist) revoked() []uint16 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]uint16(nil), c.revokes...)
 }
 
 // failAllowlist 模拟数据面授权写入失败。
