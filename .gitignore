@@ -1,0 +1,5 @@
+# eBPF 生成物中的大文件不忽略（提交 *_bpfel.go 与 *.o），但 vmlinux.h 由 VPS 生成
+bpf/vmlinux.h
+knokd
+knok
+dist/
