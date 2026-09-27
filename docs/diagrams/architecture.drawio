@@ -1,134 +1,99 @@
 <mxfile host="app.diagrams.net" type="device" version="24.0.0">
   <diagram id="knok-arch" name="knok architecture (M2)">
-    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1250" pageHeight="900" math="0" shadow="0">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="840" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
 
-        <!-- ================= Layer 3: cmd ================= -->
-        <mxCell id="l3" value="Layer 3 · cmd（组装根）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=8;fontStyle=1;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="60" width="700" height="120" as="geometry" />
+        <!-- 标题 -->
+        <mxCell id="title" value="knok 架构（M2）" style="text;html=1;align=left;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#111111;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="700" height="30" as="geometry" />
         </mxCell>
-        <mxCell id="cli" value="cmd/knok&#10;客户端 CLI（跨平台，纯 Go）&#10;keygen --psk / auth --exec" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="70" y="100" width="300" height="60" as="geometry" />
-        </mxCell>
-        <mxCell id="daemon" value="cmd/knokd&#10;守护进程（Linux）&#10;启动顺序不变量 [1]→[6]：防火墙最后装" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="400" y="100" width="310" height="60" as="geometry" />
+        <mxCell id="subtitle" value="依赖方向只允许向下 / 向接口：internal/core 的 import 里永不出现 cilium/ebpf、vishvananda/netlink（CI 用 go list 断言）" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="40" y="50" width="1080" height="22" as="geometry" />
         </mxCell>
 
-        <!-- ================= Layer 2: platform adapters ================= -->
-        <mxCell id="l2" value="Layer 2 · internal/platform（平台适配器，仅 Linux 构建）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=8;fontStyle=1;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="210" width="700" height="150" as="geometry" />
+        <!-- ============ 左列：四层 ============ -->
+        <mxCell id="bandL3" value="Layer 3 · cmd（组装根）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f8fa;strokeColor=#c9ced6;verticalAlign=top;align=left;spacingLeft=10;spacingTop=6;fontSize=13;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="88" width="680" height="128" as="geometry" />
         </mxCell>
-        <mxCell id="ebpfpkg" value="internal/platform/ebpf&#10;AttachBackend（TCX ⇄ clsact 降级）&#10;RingbufSource · MapAllowlist · 对象加载/pin" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="70" y="250" width="310" height="90" as="geometry" />
+        <mxCell id="bCli" value="cmd/knok — 客户端 CLI&#10;跨平台纯 Go · knok keygen / auth --exec&#10;只发一个 UDP 包，不等响应" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="60" y="122" width="310" height="76" as="geometry" />
         </mxCell>
-        <mxCell id="nftpkg" value="internal/platform/nftables&#10;inet knok 表（声明式整表替换）&#10;无 mark → drop；mark → accept" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="400" y="250" width="310" height="90" as="geometry" />
-        </mxCell>
-
-        <!-- ================= Layer 1: core ================= -->
-        <mxCell id="l1" value="Layer 1 · internal/core（业务核心，纯 Go，无平台依赖）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=8;fontStyle=1;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="390" width="700" height="150" as="geometry" />
-        </mxCell>
-        <mxCell id="ports" value="internal/core/ports&#10;全部接口（六边形端口）&#10;PacketSource / Allowlist / Firewall / Clock / AuditSink" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="70" y="430" width="310" height="90" as="geometry" />
-        </mxCell>
-        <mxCell id="auth" value="internal/core/auth&#10;验证管线：AEAD → 时间窗 → 防重放 → 策略 → TTL 封顶&#10;Authenticator 主循环 + 审计事件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="400" y="430" width="310" height="90" as="geometry" />
+        <mxCell id="bDaemon" value="cmd/knokd — 守护进程（Linux）&#10;启动顺序不变量 [1]→[6]，防火墙最后装&#10;-config / -uninstall / -metrics" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="390" y="122" width="310" height="76" as="geometry" />
         </mxCell>
 
-        <!-- ================= Layer 0 ================= -->
-        <mxCell id="l0" value="Layer 0 · pkg/protocol（对外公开，零 OS 依赖）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=8;fontStyle=1;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="570" width="700" height="90" as="geometry" />
+        <mxCell id="bandL2" value="Layer 2 · internal/platform（平台适配器，仅 Linux 构建）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f8fa;strokeColor=#c9ced6;verticalAlign=top;align=left;spacingLeft=10;spacingTop=6;fontSize=13;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="228" width="680" height="128" as="geometry" />
         </mxCell>
-        <mxCell id="proto" value="线格式 v1：magic &quot;KNOK&quot; | version | flags | AEAD nonce | 密文+tag&#10;XChaCha20-Poly1305（M2 为 PSK 模式；Ed25519/X25519 在 M3）&#10;测试向量固定，供第三方实现对照" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="70" y="595" width="640" height="55" as="geometry" />
+        <mxCell id="bEbpf" value="internal/platform/ebpf&#10;AttachBackend：TCX（≥6.6）⇄ clsact 兜底&#10;RingbufSource · MapAllowlist · maps 加载与 pin" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="60" y="262" width="310" height="76" as="geometry" />
         </mxCell>
-
-        <!-- ================= Kernel (right column) ================= -->
-        <mxCell id="kern" value="Linux 内核" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;align=center;fontStyle=1;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="800" y="60" width="400" height="600" as="geometry" />
-        </mxCell>
-        <mxCell id="tcprog" value="TC/TCX ingress 程序&#10;bpf/knok_ingress.c（TCX ≥ 6.6，clsact 兜底）&#10;1) allowlist 命中 → skb-&gt;mark = 0x4b4e4f4b&#10;2) magic/长度过滤垃圾包&#10;3) 候选包 → ringbuf（UDP SPA）&#10;4) 过期条目惰性删除&#10;永不主动丢弃业务流量（只打标）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;fontSize=11;spacingLeft=6;" vertex="1" parent="1">
-          <mxGeometry x="830" y="100" width="340" height="150" as="geometry" />
-        </mxCell>
-        <mxCell id="maps" value="pinned BPF maps（/sys/fs/bpf/knok）&#10;allowlist：{srcIP,port} → expiry_ns（授权状态，重启存活）&#10;cfg：spa_port / min_len / max_len&#10;spa_events：ringbuf 512KB&#10;stats：计数器（/metrics 暴露）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;fontSize=11;spacingLeft=6;" vertex="1" parent="1">
-          <mxGeometry x="830" y="270" width="340" height="120" as="geometry" />
-        </mxCell>
-        <mxCell id="nfttab" value="nftables：inet knok（knokd 独占）&#10;hook input，priority -200，policy accept&#10;meta mark 0x4b4e4f4b accept&#10;tcp dport { 受保护 } drop&#10;udp dport { 受保护 } drop&#10;udp dport SPA 端口 drop（静默）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;fontSize=11;spacingLeft=6;" vertex="1" parent="1">
-          <mxGeometry x="830" y="410" width="340" height="120" as="geometry" />
-        </mxCell>
-        <mxCell id="svc" value="受保护服务（如 sshd :22）&#10;敲门前：不可被扫描（静默丢包）&#10;敲门后：仅授权源 IP 可达，TTL 到期自动关闭" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="830" y="550" width="340" height="80" as="geometry" />
+        <mxCell id="bNft" value="internal/platform/nftables&#10;inet knok 表：声明式整表替换（幂等）&#10;无 mark → drop（终局）；mark → accept" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="390" y="262" width="310" height="76" as="geometry" />
         </mxCell>
 
-        <!-- ================= External ================= -->
-        <mxCell id="ext" value="客户端（任意 OS）&#10;一个 UDP 包：时间戳 + 随机 nonce + 请求端口/TTL" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="40" y="700" width="700" height="50" as="geometry" />
+        <mxCell id="bandL1" value="Layer 1 · internal/core（业务核心，纯 Go，macOS 上可完整单测）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f8fa;strokeColor=#c9ced6;verticalAlign=top;align=left;spacingLeft=10;spacingTop=6;fontSize=13;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="368" width="680" height="128" as="geometry" />
         </mxCell>
-        <mxCell id="escape" value="safety.admin_allow&#10;永久放行（逃生通道）：在防火墙之前写入，卸载/调试不会把自己锁在门外" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=center;fontSize=11;" vertex="1" parent="1">
-          <mxGeometry x="800" y="700" width="400" height="50" as="geometry" />
+        <mxCell id="bPorts" value="internal/core/ports — 六边形端口&#10;PacketSource / Allowlist / Firewall&#10;Clock / AuditSink（core 只认识接口）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="60" y="402" width="310" height="76" as="geometry" />
         </mxCell>
-
-        <!-- ================= Edges ================= -->
-        <mxCell id="e_cli_udp" style="endArrow=classic;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="ext" target="tcprog">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e_cli_udp_l" value="SPA UDP 包（敲门）" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=10;" vertex="1" connectable="0" parent="e_cli_udp">
-          <mxGeometry x="-0.75" y="0" relative="1" as="geometry" />
+        <mxCell id="bAuth" value="internal/core/auth — 验证管线&#10;AEAD → 时间窗 → 防重放 → 策略 → TTL 封顶&#10;Authenticator 主循环 + 结构化审计事件" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="390" y="402" width="310" height="76" as="geometry" />
         </mxCell>
 
-        <mxCell id="e_tc_rb" style="endArrow=classic;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="maps" target="tcprog">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="bandL0" value="Layer 0 · pkg/protocol（对外公开，零 OS 依赖）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f7f8fa;strokeColor=#c9ced6;verticalAlign=top;align=left;spacingLeft=10;spacingTop=6;fontSize=13;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="508" width="680" height="112" as="geometry" />
         </mxCell>
-        <mxCell id="e_tc_rb_l" value="ringbuf 上送候选包" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=10;" vertex="1" connectable="0" parent="e_tc_rb">
-          <mxGeometry x="0.7" y="0" relative="1" as="geometry" />
-        </mxCell>
-
-        <mxCell id="e_rb_kd" style="endArrow=classic;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1" source="maps" target="ebpfpkg">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e_rb_kd_l" value="RingbufSource（消费）" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=10;" vertex="1" connectable="0" parent="e_rb_kd">
-          <mxGeometry x="-0.6" y="-0.4" relative="1" as="geometry" />
+        <mxCell id="bProto" value="线格式：magic &quot;KNOK&quot; | version | flags | AEAD nonce | 密文 + tag&#10;XChaCha20-Poly1305（M2 为 PSK 模式；Ed25519/X25519 在 M3）&#10;测试向量固化，供第三方实现对照" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="60" y="544" width="640" height="62" as="geometry" />
         </mxCell>
 
-        <mxCell id="e_kd_al" style="endArrow=classic;html=1;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=1;entryY=0.7;entryDx=0;entryDy=0;" edge="1" parent="1" source="maps" target="ebpfpkg">
-          <mxGeometry relative="1" as="geometry" />
+        <!-- ============ 右列：内核 ============ -->
+        <mxCell id="bandK" value="Linux 内核" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fdf4f4;strokeColor=#e0b4b4;verticalAlign=top;align=left;spacingLeft=10;spacingTop=6;fontSize=13;fontStyle=1;fontColor=#7a2a2a;" vertex="1" parent="1">
+          <mxGeometry x="760" y="88" width="360" height="532" as="geometry" />
         </mxCell>
-        <mxCell id="e_kd_al_l" value="验证通过 → 写 allowlist" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=10;" vertex="1" connectable="0" parent="e_kd_al">
-          <mxGeometry x="-0.55" y="0.35" relative="1" as="geometry" />
+        <mxCell id="kTc" value="TC/TCX ingress 程序（bpf/knok_ingress.c）&#10;1. allowlist 命中且未过期 → skb-&gt;mark = 0x4b4e4f4b&#10;2. magic + 长度区间过滤垃圾包（扫描者无感）&#10;3. UDP SPA 候选包 → ringbuf（零拷贝上送）&#10;4. 过期条目惰性删除（TTL 精度到包）&#10;只打标，永不主动丢弃业务流量" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="780" y="122" width="320" height="132" as="geometry" />
         </mxCell>
-
-        <mxCell id="e_nft_kd" style="endArrow=classic;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="nfttab" target="nftpkg">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="kMaps" value="pinned BPF maps（/sys/fs/bpf/knok）&#10;allowlist：{srcIP, port} → expiry_ns（授权状态）&#10;cfg：spa_port / min_len / max_len&#10;spa_events：ringbuf 512KB · stats：计数器&#10;pin 复用 → knokd 重启不丢已授权状态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="780" y="268" width="320" height="122" as="geometry" />
         </mxCell>
-        <mxCell id="e_nft_kd_l" value="整表替换（启动时一次）" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=10;" vertex="1" connectable="0" parent="e_nft_kd">
-          <mxGeometry x="0.65" y="-0.15" relative="1" as="geometry" />
+        <mxCell id="kNft" value="nftables：inet knok（knokd 独占，绝不碰用户表）&#10;hook input，priority -200，policy accept&#10;meta mark 0x4b4e4f4b accept&#10;tcp dport { 受保护 } drop · udp dport { 受保护 } drop&#10;udp dport SPA 端口 drop（保持静默）&#10;knokd 退出时保留该表（fail-closed）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="780" y="404" width="320" height="122" as="geometry" />
         </mxCell>
-
-        <mxCell id="e_tc_svc" style="endArrow=classic;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="nfttab" target="svc">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e_tc_svc_l" value="mark 匹配 → accept（继续走用户链）" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontSize=10;" vertex="1" connectable="0" parent="e_tc_svc">
-          <mxGeometry x="-0.7" y="0" relative="1" as="geometry" />
+        <mxCell id="kSvc" value="受保护服务（如 sshd :22）&#10;敲门前不可扫描；敲门后仅授权源 IP 可达" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="780" y="540" width="320" height="60" as="geometry" />
         </mxCell>
 
-        <mxCell id="e_daemon_ebpf" style="endArrow=classic;html=1;exitX=0.15;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="daemon" target="ebpfpkg">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e_cli_proto" style="endArrow=classic;html=1;exitX=0.2;exitY=1;exitDx=0;exitDy=0;entryX=0.2;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="cli" target="proto">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e_core_proto" style="endArrow=classic;html=1;exitX=0.8;exitY=1;exitDx=0;exitDy=0;entryX=0.8;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="auth" target="proto">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="e_escape_al" style="endArrow=classic;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.9;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="escape" target="maps">
-          <mxGeometry relative="1" as="geometry" />
+        <!-- ============ 逃生通道 ============ -->
+        <mxCell id="bEscape" value="safety.admin_allow — 逃生通道：永久放行（在防火墙之前写入），调试/卸载都不会把自己锁在门外" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=11;fontColor=#123456;" vertex="1" parent="1">
+          <mxGeometry x="40" y="636" width="1080" height="34" as="geometry" />
         </mxCell>
 
-        <mxCell id="note" value="依赖方向只允许向下 / 向接口：core 的 import 里永不出现 cilium-ebpf、vishvananda-netlink（CI 用 go list 断言）。平台适配器共用同一份 map 定义与 core 接口，attach 方式（TCX/clsact）只是实现细节。" style="text;html=1;align=left;verticalAlign=top;fontSize=11;fontColor=#444444;" vertex="1" parent="1">
-          <mxGeometry x="40" y="780" width="1150" height="50" as="geometry" />
+        <!-- ============ 编号流程说明（替代连线） ============ -->
+        <mxCell id="flowTitle" value="数据流（编号对应上方的方框；完整报文时序见 docs/diagrams/knock-flow.puml）" style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="684" width="1080" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="flow1" value="① 敲门：客户端 → spa_udp_port（UDP）→ TC/TCX ingress 的候选匹配；非候选包在此静默丢弃。" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="708" width="1080" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="flow2" value="② 上送：候选包经 ringbuf 交给 knokd（internal/platform/ebpf 的 RingbufSource）。" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="730" width="1080" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="flow3" value="③ 验证：internal/core/auth 依次做 AEAD、时间窗、防重放（内存 nonce 缓存，M3 落持久化）、策略、TTL 封顶；全程不回复客户端。" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="752" width="1080" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="flow4" value="④ 授权：通过后写 allowlist map（{srcIP, port} → expiry_ns）并落一条 spa_grant 审计事件；该 map 是 pinned 的，重启不丢。" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="774" width="1080" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="flow5" value="⑤ 放行：业务包到达时 TC/TCX 查 allowlist 命中 → skb-&gt;mark；nftables 见到 mark → accept（继续走用户防火墙链）。" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="796" width="1080" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="flow6" value="⑥ 到期：数据路径内联判断过期并惰性删除条目 → 不再打 mark → 端口重新对外隐身（无定时任务、无需删规则）。" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#444444;" vertex="1" parent="1">
+          <mxGeometry x="40" y="818" width="1080" height="20" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

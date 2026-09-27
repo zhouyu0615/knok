@@ -27,7 +27,7 @@ knok 的做法是**让这个端口在网络层彻底不存在**：
 
 ![knok 架构](docs/diagrams/architecture.svg)
 
-控制面（Go）负责验证敲门包并把授权状态写进 pinned eBPF map；数据面（TC/TCX）只做三件事——查这份状态、给已授权的包打 mark、过滤垃圾包。accept/drop 的最终裁决由 knok 独占的 nftables 表完成。这个分工正是 NAT、conntrack 和你现有日志都能继续工作的原因。
+控制面（Go）负责验证敲门包并把授权状态写进 pinned eBPF map；数据面（TC/TCX）只做三件事——查这份状态、给已授权的包打 mark、过滤垃圾包。accept/drop 的最终裁决由 knok 独占的 nftables 表完成。这个分工正是 NAT、conntrack 和你现有日志都能继续工作的原因。图下方的编号 ①–⑥ 就是数据路径。
 
 完整主流程（敲门 → 验证 → 业务流量放行 → TTL 到期）：
 

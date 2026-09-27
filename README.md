@@ -27,7 +27,7 @@ knok removes the port from the network entirely:
 
 ![knok architecture](docs/diagrams/architecture.svg)
 
-The control plane (Go) verifies knocks and writes authorization state into pinned eBPF maps. The data plane (TC/TCX) only looks up that state, marks authorized packets, and filters junk — the accept/drop decision belongs to an nftables table knok owns. That split is why NAT, conntrack and your existing logging keep working.
+The control plane (Go) verifies knocks and writes authorization state into pinned eBPF maps. The data plane (TC/TCX) only looks up that state, marks authorized packets, and filters junk — the accept/drop decision belongs to an nftables table knok owns. That split is why NAT, conntrack and your existing logging keep working. The numbered lines ①–⑥ under the diagram are the data path.
 
 The full knock flow — knock, verification, authorized traffic, TTL expiry:
 
