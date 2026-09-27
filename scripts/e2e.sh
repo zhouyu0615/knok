@@ -10,7 +10,9 @@
 #   step 2 敲门：`knok auth` 后端口在轮询窗口内打开
 #   step 3 TTL 到期：端口重新关闭
 #   step 4 重启存活：再次敲门 + 杀掉/重启守护进程，授权不中断
-#          （pinned allowlist map + pinned TCX link 的语义）
+#          （pinned allowlist map + pinned TCX link 的语义）；守护进程停止期间
+#          **直接断言** pin 目录与 tcx-* link pin 仍在（TCX 分支），再断言可达性
+#          ——可达性只能证明"授权还在"，证明不了"是 pin 在承载它"
 #   step 5 逃生通道：第二份配置带 safety.admin_allow，不敲门也打开，
 #          且未被覆盖的源地址仍被 drop（反证 drop 规则确实在生效）
 #   cleanup 收尾：不留守护进程、不留 inet knok 表、不留 /sys/fs/bpf 下的 pin、
@@ -58,9 +60,11 @@ PSK=""
 
 DAEMON_PID=""      # 当前守护进程
 DAEMON_LOG=""      # 当前守护进程日志
+DAEMON_BACKEND=""  # 守护进程实际选中的后端（"tcx"/"clsact"，从日志读出）
 DAEMON_STARTED=0   # 启动过几次（cleanup 据此决定是否需要 -uninstall）
 LISTENER_PID=""    # 监听器循环（subshell）
 PRE_TC=""          # 运行前的 tc ingress 快照（收尾时对比）
+PRE_TCX_LINKS="n/a" # 运行前的内核 tcx link 条数（收尾时对比；bpftool 不可用即 n/a）
 
 FAILED=0           # 任一步失败
 CLEAN_FAIL=0       # 收尾核查失败
@@ -232,13 +236,26 @@ stop_listener() {
 }
 
 # kill_marked <signal>：给所有带本次运行标记的进程发信号（干净回收的兜底通道）。
+#
+# 护栏：跳过 PID 1、**本脚本自身（$$）与本脚本的父 shell（$PPID）**。pgrep -f 匹配
+# 的是完整命令行，而运行标记会出现在本次运行的每一个 argv 里（临时目录名、监听器
+# 脚本路径、knokd 的 -config 路径）；只要将来有任何一条路径让本脚本自己的 argv 也
+# 带上标记，"兜底清理"就会变成"清理自己"——收尾核查再也跑不到（手工排查时踩过一次
+# 类似的自我终止）。被信号打到的父 shell 同样会让脚本以一个看不出原因的方式结束。
 kill_marked() {
-  local sig="$1" pids p
+  local sig="$1" pids p skipped=""
   pids=$(pgrep -f -- "$RUN_MARK" 2>/dev/null || true)
   [ -n "$pids" ] || return 0
   for p in $pids; do
+    if [ "$p" = "1" ] || [ "$p" = "$$" ] || [ "$p" = "$PPID" ]; then
+      skipped="$skipped $p"
+      continue
+    fi
     kill "-$sig" "$p" 2>/dev/null || true
   done
+  if [ -n "$skipped" ]; then
+    printf 'kill_marked: skipped self/parent pid(s):%s\n' "$skipped"
+  fi
 }
 
 # port_owner_pid：返回当前监听 $PORT 的进程 PID（没有则空）。
@@ -295,6 +312,15 @@ stop_daemon() {
     kill -KILL "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   fi
+}
+
+# daemon_backend 从当前守护进程的日志里读出 DetectBackend() 的选择（slog 的
+# "msg":"backend" 那条）。读不到时返回 "unknown"——step 4 只在 tcx 分支上断言
+# link pin（clsact 的附着没有 pin，filter 天然存活）。
+daemon_backend() {
+  local v
+  v=$(sed -n 's/.*"msg":"backend".*"kind":"\([^"]*\)".*/\1/p' "${DAEMON_LOG:-/dev/null}" 2>/dev/null | head -1)
+  printf '%s' "${v:-unknown}"
 }
 
 # reset_kernel_state <config> <label>：拆表 + 两个后端摘附着 + 删 pin 目录。
@@ -413,8 +439,19 @@ LAST_LISTENER_OWNER=""
 # ---------------------------------------------------------------------------
 # 收尾核查：机器必须回到运行前的样子
 # ---------------------------------------------------------------------------
+# tcx_link_count：内核里 tcx link 的条数（bpftool 不可用时打印 "n/a"）。
+#
+# 为什么需要它：`tc filter show dev lo ingress` 对 TCX 后端**结构性失明**——TCX 的
+# 附着体是内核里的 bpf_link 对象，不挂在 cls_bpf 的 filter 列表上。所以下面那段
+# tc filter 对比只能证明 clsact 后端的附着被清掉了；TCX 的残留（link 泄漏）必须用
+# bpftool 数出来。两个判据互补，缺一个就有一半的机器状态没人看。
+tcx_link_count() {
+  command -v bpftool >/dev/null 2>&1 || { printf 'n/a'; return 0; }
+  bpftool link show 2>/dev/null | grep -c tcx || true
+}
+
 verify_cleanup() {
-  local pins_now tc_now
+  local pins_now tc_now tcx_now
   printf '\n== cleanup verification\n'
 
   if pgrep -f -- "$RUN_MARK" >/dev/null 2>&1; then
@@ -442,14 +479,30 @@ verify_cleanup() {
       "${pins_now:-<empty>}"
   fi
 
+  # 这一段只对 **clsact** 后端有意义（见 tcx_link_count 的注释）：knok 在 clsact 上
+  # 的附着就是 ingress 上的一条 cls_bpf filter，tc filter show 看得见它。TCX 的附着
+  # 不在这个列表里，所以下面的 PASS 对 TCX 是"空过"——真正的 TCX 判据是紧随其后的
+  # bpftool link 计数。
   tc_now=$(tc filter show dev lo ingress 2>&1 || true)
   if [ "$tc_now" != "$PRE_TC" ]; then
-    printf 'FAIL  cleanup: tc ingress on lo changed\n  before: %s\n  after:  %s\n' \
+    printf 'FAIL  cleanup: tc ingress on lo changed (clsact-only check)\n  before: %s\n  after:  %s\n' \
       "${PRE_TC:-<empty>}" "${tc_now:-<empty>}"
     CLEAN_FAIL=1
   else
-    printf 'PASS  cleanup: tc ingress on lo unchanged (%s)\n' \
+    printf 'PASS  cleanup: tc ingress on lo unchanged (clsact-only check; %s)\n' \
       "$([ -n "$tc_now" ] && printf 'non-empty' || printf 'empty')"
+  fi
+
+  # TCX 的附着残留判据：bpftool 数内核里的 tcx link。
+  tcx_now=$(tcx_link_count)
+  if [ "$tcx_now" = "n/a" ]; then
+    printf 'WARN  cleanup: bpftool not available — TCX link residue was NOT checked\n'
+  elif [ "$tcx_now" != "$PRE_TCX_LINKS" ]; then
+    printf 'FAIL  cleanup: tcx link count changed (%s before -> %s after; tc filter show cannot see tcx links)\n' \
+      "$PRE_TCX_LINKS" "$tcx_now"
+    CLEAN_FAIL=1
+  else
+    printf 'PASS  cleanup: tcx link count unchanged (%s)\n' "$tcx_now"
   fi
 
   if [ -n "$WORK" ] && [ -e "$WORK" ]; then
@@ -546,8 +599,10 @@ printf 'e2e: repo %s\n' "$REPO_ROOT"
 # 运行前的快照（收尾时逐项对比）
 PRE_TC=$(tc filter show dev lo ingress 2>&1 || true)
 PRE_PINS=$(ls -A /sys/fs/bpf 2>/dev/null | sort | tr '\n' ' ' || true)
+PRE_TCX_LINKS=$(tcx_link_count)
 printf 'e2e: pre-run tc ingress on lo: %s\n' "$([ -n "$PRE_TC" ] && printf 'non-empty' || printf 'empty')"
 printf 'e2e: pre-run /sys/fs/bpf: %s\n' "${PRE_PINS:-<empty>}"
+printf 'e2e: pre-run tcx link count: %s\n' "$PRE_TCX_LINKS"
 if nft list table inet knok >/dev/null 2>&1; then
   printf 'WARN  startup: leftover nft table "inet knok" found (a previous run did not clean up); the pre-flight reset below removes it\n'
 fi
@@ -647,6 +702,8 @@ start_daemon "$CFG_SIMPLE" "$WORK/daemon-1.log"
 if ! wait_for_log "$DAEMON_LOG" 'firewall installed' 10; then
   die "daemon 1 never logged 'firewall installed' (last observed probe: $(probe))"
 fi
+DAEMON_BACKEND=$(daemon_backend)
+printf 'daemon 1 backend: %s\n' "$DAEMON_BACKEND"
 if ! wait_for_state timeout "$OPEN_BUDGET" "silent drop before knock"; then
   die "port not silently dropped before the knock (last observed: $LAST_PROBE)"
 fi
@@ -698,6 +755,24 @@ fi
 HIT_BEFORE_RESTART=$(allow_hit)
 printf 'stopping daemon (pid %s) — the drop rule and the grant must stay in the kernel\n' "$DAEMON_PID"
 stop_daemon
+# 断言**机制**而不是只靠可达性：可达性只证明"授权还在"，而"授权为什么还在"是
+# pinned 的 allowlist map（+ TCX 的 pinned link）。守护进程已经退出，pin 目录里
+# 的东西只剩内核对象持有者，所以这里能直接读到"崩溃存活"的物理证据。
+# clsact 后端没有 link pin（filter 天然存活），所以这一条按后端分流。
+if [ "$DAEMON_BACKEND" = "tcx" ]; then
+  if [ ! -d "$PIN_DIR" ] || [ -z "$(ls -A "$PIN_DIR" 2>/dev/null)" ]; then
+    printf 'pin dir %s contents: %s\n' "$PIN_DIR" "$(ls -A "$PIN_DIR" 2>/dev/null | tr '\n' ' ')"
+    die "step 4: pin dir $PIN_DIR is empty while the daemon is stopped — nothing carries the grant across the restart"
+  fi
+  if ! ls "$PIN_DIR" 2>/dev/null | grep -q '^tcx-'; then
+    printf 'pin dir %s contents: %s\n' "$PIN_DIR" "$(ls -A "$PIN_DIR" 2>/dev/null | tr '\n' ' ')"
+    die "step 4: no tcx-<ifindex> link pin in $PIN_DIR — the TCX attachment is not crash-surviving"
+  fi
+  printf 'pinned state survives with no daemon (pin dir %s: %s)\n' "$PIN_DIR" \
+    "$(ls -A "$PIN_DIR" 2>/dev/null | tr '\n' ' ')"
+else
+  printf 'note: backend=%s keeps attachments without a link pin; step 4 asserts reachability only\n' "$DAEMON_BACKEND"
+fi
 if ! wait_for_state open "$OPEN_BUDGET" "port open with the daemon stopped"; then
   die "grant lost when the daemon stopped (pinned link/map should keep it; last observed: $LAST_PROBE)"
 fi
