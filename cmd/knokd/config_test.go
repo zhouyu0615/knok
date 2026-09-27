@@ -377,20 +377,32 @@ func TestLoadConfigMissingFile(t *testing.T) {
 // 目录而不是中止。这是"配置被删/被写坏"这一恢复场景的可执行定义——uninstall 是
 // 运维在这种情况下唯一的回收通道，它不能被同一份坏配置挡住。
 //
+// 例外是 pin.dir 本身（finding A）：它是 os.RemoveAll 的目标，读得出来但过不了
+// validPinDir 时返回错误（调用方据此**拒绝**删除），而不是退回默认目录。
+//
 // fallback 是参数（生产侧传 ebpfplat.DefaultPinDir），所以本用例在 macOS 上也能跑。
 func TestUninstallPinDir(t *testing.T) {
 	const fallback = "/sys/fs/bpf/knok"
 
+	mustPinDir := func(t *testing.T, path string) string {
+		t.Helper()
+		got, err := uninstallPinDir(path, fallback)
+		if err != nil {
+			t.Fatalf("uninstallPinDir(%s) = error %v, want a pin dir", path, err)
+		}
+		return got
+	}
+
 	t.Run("missing file falls back", func(t *testing.T) {
-		got := uninstallPinDir(filepath.Join(t.TempDir(), "gone.toml"), fallback)
+		got := mustPinDir(t, filepath.Join(t.TempDir(), "gone.toml"))
 		if got != fallback {
 			t.Errorf("uninstallPinDir(missing) = %q, want %q", got, fallback)
 		}
 	})
 
 	t.Run("malformed toml falls back", func(t *testing.T) {
-		// 结构性坏配置（TOML 都解析不了）：LoadConfig 一定会失败，回收必须照做。
-		got := uninstallPinDir(writeCfg(t, "[keys\npsk = 1\n"), fallback)
+		// 结构性坏配置（TOML 都解析不了）：回收必须照做。
+		got := mustPinDir(t, writeCfg(t, "[keys\npsk = 1\n"))
 		if got != fallback {
 			t.Errorf("uninstallPinDir(malformed) = %q, want %q", got, fallback)
 		}
@@ -398,7 +410,8 @@ func TestUninstallPinDir(t *testing.T) {
 
 	t.Run("structurally invalid falls back", func(t *testing.T) {
 		// 通过 TOML 解析但过不了结构校验（缺 interfaces）——同样是"起不来"的配置。
-		got := uninstallPinDir(writeCfg(t, "[keys]\npsk = \"hex:"+validPSKHex+"\"\n"), fallback)
+		// 回收只做纯解析，所以这种配置连 pin.dir 都读得出来（没有就退回默认）。
+		got := mustPinDir(t, writeCfg(t, "[keys]\npsk = \"hex:"+validPSKHex+"\"\n"))
 		if got != fallback {
 			t.Errorf("uninstallPinDir(no interfaces) = %q, want %q", got, fallback)
 		}
@@ -406,7 +419,7 @@ func TestUninstallPinDir(t *testing.T) {
 
 	t.Run("valid config uses its pin.dir", func(t *testing.T) {
 		body := minCfg + "[pin]\ndir = \"/sys/fs/bpf/knok-e2e\"\n"
-		if got := uninstallPinDir(writeCfg(t, body), fallback); got != "/sys/fs/bpf/knok-e2e" {
+		if got := mustPinDir(t, writeCfg(t, body)); got != "/sys/fs/bpf/knok-e2e" {
 			t.Errorf("uninstallPinDir(valid) = %q, want /sys/fs/bpf/knok-e2e", got)
 		}
 	})
@@ -414,18 +427,181 @@ func TestUninstallPinDir(t *testing.T) {
 	t.Run("valid config without pin.dir uses the parsed default", func(t *testing.T) {
 		// 配置有效但没写 [pin]：用 LoadConfig 填的默认值（与 fallback 同值，
 		// 但这条路径证明它来自配置的默认填充，而不是"配置读失败"）。
-		if got := uninstallPinDir(writeCfg(t, minCfg), fallback); got != fallback {
+		if got := mustPinDir(t, writeCfg(t, minCfg)); got != fallback {
 			t.Errorf("uninstallPinDir(default) = %q, want %q", got, fallback)
 		}
 	})
 
 	t.Run("bad psk and bad durations do not block clean-up", func(t *testing.T) {
-		// PSK 与时长不是结构校验的一部分：这类配置能让 run() 退出 2，但 -uninstall
+		// PSK 与时长不是纯解析的一部分：这类配置能让 run() 退出 2，但 -uninstall
 		// 必须照常工作，并使用配置里的 pin.dir。
 		body := "[keys]\npsk = \"deadbeef\"\n[interfaces]\nmode = \"explicit\"\nexplicit = [\"lo\"]\n" +
 			"[policy]\nmax_ttl = \"5minutes\"\n[pin]\ndir = \"/sys/fs/bpf/knok-e2e\"\n"
-		if got := uninstallPinDir(writeCfg(t, body), fallback); got != "/sys/fs/bpf/knok-e2e" {
+		if got := mustPinDir(t, writeCfg(t, body)); got != "/sys/fs/bpf/knok-e2e" {
 			t.Errorf("uninstallPinDir(bad psk/duration) = %q, want /sys/fs/bpf/knok-e2e", got)
+		}
+	})
+
+	t.Run("unsafe pin.dir is refused, not silently replaced", func(t *testing.T) {
+		// finding A 的核心场景：pin.dir 少写了 /knok。这里必须报错（调用方据此
+		// 拒绝删除），绝不能被当成"清理默认目录"的许可。
+		body := minCfg + "[pin]\ndir = \"/sys/fs/bpf\"\n"
+		got, err := uninstallPinDir(writeCfg(t, body), fallback)
+		if err == nil {
+			t.Fatalf("uninstallPinDir(unsafe) = %q, nil; want an error so the caller refuses to delete", got)
+		}
+		if got != "" {
+			t.Errorf("uninstallPinDir(unsafe) returned dir %q alongside the error; want no usable dir", got)
+		}
+		if !strings.Contains(err.Error(), "pin.dir") {
+			t.Errorf("error %q does not mention pin.dir", err)
+		}
+	})
+}
+
+// TestLoadConfigRejectsUnsafePinDir 钉住 finding A 的第一道闸：配置期就拒绝
+// 不可能安全清理的 pin.dir。判据本身由 TestValidPinDir 逐项钉住，这里只证明
+// LoadConfig 真的用了它（且在任何内核状态被触碰之前失败）。
+//
+// 空字符串不在此列：与其它字段一样，空键先被默认值填成 /sys/fs/bpf/knok
+// （默认值本身必须过判据，见 TestLoadConfigDefaults）。
+func TestLoadConfigRejectsUnsafePinDir(t *testing.T) {
+	for _, dir := range []string{"/", ".", "/sys", "sys/fs/bpf", "/sys/fs/bpf", "/sys/fs/bpf/.."} {
+		t.Run("reject "+dir, func(t *testing.T) {
+			body := minCfg + "[pin]\ndir = " + tomlString(dir) + "\n"
+			if _, err := LoadConfig(writeCfg(t, body)); err == nil {
+				t.Fatalf("LoadConfig accepted pin.dir = %q (a plausible typo would remove every other tool's pins as root)", dir)
+			}
+		})
+	}
+	t.Run("accept deep paths", func(t *testing.T) {
+		for _, dir := range []string{"/sys/fs/bpf/knok", "/sys/fs/bpf/knok-e2e"} {
+			body := minCfg + "[pin]\ndir = " + tomlString(dir) + "\n"
+			cfg, err := LoadConfig(writeCfg(t, body))
+			if err != nil {
+				t.Fatalf("LoadConfig rejected %q: %v", dir, err)
+			}
+			if cfg.Pin.Dir != dir {
+				t.Errorf("pin.dir = %q, want %q", cfg.Pin.Dir, dir)
+			}
+		}
+	})
+}
+
+// TestValidPinDir 是判据本身的表驱动单测（纯函数，任意平台可跑）。
+// 合法的只有"看起来像 <root>/<leaf>"、且不是默认 pin 目录祖先的绝对路径。
+func TestValidPinDir(t *testing.T) {
+	tests := []struct {
+		dir  string
+		want bool
+	}{
+		{"/sys/fs/bpf/knok", true},
+		{"/sys/fs/bpf/knok-e2e", true},
+		{"/var/lib/knok", true}, // 自定义位置合法：判据只保证不是 ±1 级笔误
+		{"/", false},
+		{".", false},
+		{"/sys", false},
+		{"sys/fs/bpf", false},
+		{"", false},
+		{"relative/dir", false},
+		{"..", false},
+		{"//", false},
+		// finding A 的原始场景：少写最后一级（元素计数抓不到它，祖先判据抓住）。
+		{"/sys/fs/bpf", false},
+		// 原始路径里的 . / .. 分量：Clean 会解析掉它们（/sys/fs/bpf/.. → /sys/fs），
+		// 删除目标就不是写下来的那个了——一律拒绝。
+		{"/sys/fs/bpf/..", false},
+		{"/sys/fs/bpf/./knok", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.dir, func(t *testing.T) {
+			if got := validPinDir(tc.dir); got != tc.want {
+				t.Errorf("validPinDir(%q) = %v, want %v", tc.dir, got, tc.want)
+			}
+		})
+	}
+}
+
+// tomlString 渲染一个 TOML 字符串字面量（路径里不会有引号/反斜杠，够用）。
+func tomlString(s string) string { return `"` + s + `"` }
+
+// TestLoadConfigRejectsNonPositiveDurations 钉住 ride-along 修复：能解析但 <= 0
+// 的时长必须在配置期拒绝。零 TTL 的实害是**静默**的：包能穿过管线（只有
+// msg.TTL==0 才被拒），cap 到 max_ttl=0 后授权立刻过期，而审计里是一条授权成功。
+func TestLoadConfigRejectsNonPositiveDurations(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"max_ttl zero", minCfg + "[policy]\nmax_ttl = \"0s\"\n"},
+		{"max_ttl negative", minCfg + "[policy]\nmax_ttl = \"-30s\"\n"},
+		{"ts_window zero", minCfg + "[policy]\nts_window = \"0\"\n"},
+		{"ts_window negative", minCfg + "[policy]\nts_window = \"-1m\"\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfig(writeCfg(t, tc.body))
+			if err == nil {
+				t.Fatal("LoadConfig accepted a non-positive duration")
+			}
+			if !strings.Contains(err.Error(), "must be > 0") {
+				t.Errorf("error %q does not explain the > 0 requirement", err)
+			}
+		})
+	}
+	// 语法错误仍留给 Durations（错误文案与位置固定），所以这一条必须仍然能
+	// 通过 LoadConfig——否则 TestDurationsRejectsBadUnit 的路径就没人走了。
+	t.Run("syntax errors still deferred to Durations", func(t *testing.T) {
+		cfg, err := LoadConfig(writeCfg(t, minCfg+"[policy]\nmax_ttl = \"5minutes\"\n"))
+		if err != nil {
+			t.Fatalf("LoadConfig rejected an unparseable duration (should defer to Durations): %v", err)
+		}
+		if _, _, err := cfg.Durations(); err == nil {
+			t.Fatal("Durations accepted \"5minutes\"")
+		}
+	})
+}
+
+// TestPolicyWarnings 钉住 finding D 的两条启动期警告：受保护端口不在
+// allowed_ports 里（装了 drop 却没人能拿到授权 = 静默远程锁死），以及
+// allowed_ports 为空（任何敲门都只会得到 reject_reason=policy）。
+func TestPolicyWarnings(t *testing.T) {
+	cfgOf := func(t *testing.T, protected, allowed string) *Config {
+		t.Helper()
+		body := minCfg + "[listen]\nprotected_ports = [" + protected + "]\n" +
+			"[policy]\nallowed_ports = [" + allowed + "]\n"
+		cfg, err := LoadConfig(writeCfg(t, body))
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		return cfg
+	}
+
+	t.Run("protected port outside allowed_ports warns", func(t *testing.T) {
+		ws := policyWarnings(cfgOf(t, "22, 22222", "22222"))
+		if len(ws) != 1 || !strings.Contains(ws[0], "22") {
+			t.Fatalf("warnings = %q, want exactly one mentioning port 22", ws)
+		}
+	})
+
+	t.Run("empty allowed_ports warns", func(t *testing.T) {
+		ws := policyWarnings(cfgOf(t, "22", ""))
+		// 两条都该出现：端口 22 没被允许 + allowed_ports 为空。
+		if len(ws) != 2 {
+			t.Fatalf("warnings = %q, want 2 (empty allowed_ports + port 22 outside it)", ws)
+		}
+	})
+
+	t.Run("consistent config is silent", func(t *testing.T) {
+		if ws := policyWarnings(cfgOf(t, "22, 22222", "22, 22222")); len(ws) != 0 {
+			t.Fatalf("warnings = %q, want none", ws)
+		}
+	})
+
+	t.Run("no protected ports is silent", func(t *testing.T) {
+		// 只有 SPA 端口、没有受保护端口：没有任何东西会被永久 drop，不该吵。
+		if ws := policyWarnings(cfgOf(t, "", "22")); len(ws) != 0 {
+			t.Fatalf("warnings = %q, want none", ws)
 		}
 	})
 }

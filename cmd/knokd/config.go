@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -72,7 +74,10 @@ func LoadConfig(path string) (*Config, error) {
 		c.Listen.SPAUDPPort = 4242
 	}
 	if c.Pin.Dir == "" {
-		c.Pin.Dir = "/sys/fs/bpf/knok"
+		c.Pin.Dir = defaultPinDir
+	}
+	if !validPinDir(c.Pin.Dir) {
+		return nil, fmt.Errorf("config: pin.dir %q is not a safe cleanup target: it must be an absolute path with at least two elements (e.g. /sys/fs/bpf/knok) because -uninstall recursively deletes it as root", c.Pin.Dir)
 	}
 	if c.Interfaces.Mode != "explicit" || len(c.Interfaces.Explicit) == 0 {
 		return nil, fmt.Errorf("config: M2 requires interfaces.mode=explicit with at least one interface")
@@ -83,7 +88,97 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Policy.TSWindow == "" {
 		c.Policy.TSWindow = "300s"
 	}
+	// "能解析但 <= 0"的时长在这里就拒绝：TTL 为 0 的包能穿过管线（只有 msg.TTL
+	// 为 0 才被拒），而 cap 到 max_ttl=0 后授权立刻过期——审计里却是一条授权成功。
+	// 语法错误的时长**不**在这里报：那是 Durations 的职责（run 的 step [1]），
+	// 错误文案与位置都已固定。两条路径的终点一致（配置错 → 退出码 2）。
+	if err := requirePositiveDuration("policy.max_ttl", c.Policy.MaxTTL); err != nil {
+		return nil, err
+	}
+	if err := requirePositiveDuration("policy.ts_window", c.Policy.TSWindow); err != nil {
+		return nil, err
+	}
 	return &c, nil
+}
+
+// validPinDir 报告一个路径能否作为 -uninstall 的 os.RemoveAll 目标。
+//
+// 这条路径上的错误是**不可逆**的：-uninstall 以 root 递归删除该目录，一个形如
+// /sys/fs/bpf 的笔误（少写 /knok）会把别的工具 pin 的 map/程序全部删掉，然后
+// 报告成功。所以判据收紧到"看起来像 <root>/<leaf>"：
+//
+// defaultPinDir 是 pin 目录的默认值（spec §5.1 冻结：/sys/fs/bpf/knok），也是
+// validPinDir 判定"祖先"的基准。它与 ebpfplat.DefaultPinDir（Linux 专属包）同值，
+// 这里单独写一份是为了让本文件不带构建标签——判据本身必须能在 macOS 上单测。
+const defaultPinDir = "/sys/fs/bpf/knok"
+
+//   - 必须是绝对路径（相对路径的删除目标取决于进程 CWD，无法审计）；
+//   - 原始路径里不得出现 . 或 .. 分量：Clean 会把它们解析掉，于是"看起来在 A、
+//     实际删 B"（/sys/fs/bpf/.. 的 Clean 结果是 /sys/fs——正是不可逆的多删一层）；
+//   - Clean 后不能是 /、.、..，且至少有**两个**非空分量（/sys、/etc 这类根拒绝）；
+//   - 不得是默认 pin 目录的**祖先**：少了最后一级的 /sys/fs/bpf 有足够的分量数，
+//     但删它就是把所有其它工具 pin 的 map/程序一起删掉（finding A 的原始场景）。
+//
+// 合法的值：/sys/fs/bpf/knok、/sys/fs/bpf/knok-e2e（后者是 e2e 的隔离目录）。
+//
+// 本函数不带构建标签（配置层的判定与平台无关），因此 LoadConfig 与 main.go 的
+// 删除点共用同一份判据，并且能在 macOS 上单测。
+func validPinDir(dir string) bool {
+	if dir == "" || !filepath.IsAbs(dir) {
+		return false
+	}
+	for _, part := range strings.Split(dir, "/") {
+		if part == "." || part == ".." {
+			return false
+		}
+	}
+	clean := filepath.Clean(dir)
+	if clean == "/" || clean == "." || clean == ".." {
+		return false
+	}
+	if strings.HasPrefix(defaultPinDir, clean+"/") {
+		return false // clean 是默认 pin 目录的祖先
+	}
+	parts := strings.Split(strings.Trim(clean, "/"), "/")
+	return len(parts) >= 2
+}
+
+// requirePositiveDuration 挡住"能解析但 <= 0"的时长；解析失败的值返回 nil
+// （交给 Durations 报错，见 LoadConfig 的注释）。
+func requirePositiveDuration(name, v string) error {
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return nil
+	}
+	if d <= 0 {
+		return fmt.Errorf("config: %s = %q must be > 0 (a zero duration yields a grant that expires immediately)", name, v)
+	}
+	return nil
+}
+
+// policyWarnings 返回"配置能启动、但会让某个受保护端口永久锁死"的组合说明。
+//
+// 两条都是静默的远程锁死：
+//
+//   - protected_ports 里有 allowed_ports 之外的端口：drop 规则照装，但没有任何
+//     客户端能被授予它（管线要求请求端口 ⊆ allowed_ports），该端口从此永久
+//     drop——包括管理员自己；
+//   - allowed_ports 为空：任何敲门都只会得到 reject_reason=policy。
+//
+// 是**警告而不是错误**：合法的运维形态存在（例如先用 safety.admin_allow 打开
+// 再补 allowed_ports），拒绝启动会把一份可用的配置判死。但它必须在装 drop 规则
+// **之前**说出来——装完之后这个组合就是"门锁上了、钥匙没了"。
+func policyWarnings(c *Config) []string {
+	var out []string
+	if len(c.Policy.AllowedPorts) == 0 {
+		out = append(out, "policy.allowed_ports is empty: every knock is rejected with reject_reason=policy; only safety.admin_allow can open a protected port")
+	}
+	for _, p := range c.Listen.ProtectedPorts {
+		if !slices.Contains(c.Policy.AllowedPorts, p) {
+			out = append(out, fmt.Sprintf("listen.protected_ports includes %d but policy.allowed_ports does not: the drop rule is installed for %d while no client can ever be granted it (silent remote lockout)", p, p))
+		}
+	}
+	return out
 }
 
 // PSK 解析 M2 的预共享密钥。
@@ -143,21 +238,36 @@ func (c *Config) AdminAddrs() ([]netip.Addr, error) {
 // uninstallPinDir 解析 -uninstall 该清理哪个 pin 目录。
 //
 // 回收路径刻意**不依赖配置可用**：配置被删掉、或写坏到起不来，恰恰是最需要把
-// 防火墙拆掉的时刻（否则只能手敲 nft delete table inet knok）。防火墙表与 tc/
-// clsact 附着都不需要配置就能回收，所以配置读不出来时这里只退化为 fallback
-// （ebpfplat.DefaultPinDir）并记一条 warn，绝不中止。
+// 防火墙拆掉的时刻（否则只能手敲 nft delete table inet knok）。因此这里只做一次
+// **纯解析**（toml.DecodeFile 到一个只含 pin.dir 的临时结构），不跑 LoadConfig 的
+// 语义校验：PSK 格式、时长、接口模式都可能是坏配置，而它们与"该删哪个目录"无关。
+//
+// 唯一必须违逆"不挡住回收"原则的字段就是 pin.dir 本身——它是紧接着 os.RemoveAll
+// 的目标。读得出来但过不了 validPinDir 时返回错误，调用方据此**拒绝删除**（而不是
+// 退回默认目录）：一份指向 /sys/fs/bpf 的笔误配置绝不能被当成"清理
+// /sys/fs/bpf/knok"的许可，也不能让删除目标变成"配置说 A、实际删 B"。
 //
 // fallback 由调用方传入而不是在这里直接引用 ebpfplat.DefaultPinDir：本文件不带
 // 构建标签（判定与平台无关、可在 macOS 上单测），而 ebpfplat 是 Linux 专属包。
 //
-// 读得出来时用配置里的 pin.dir：pin 文件（tcx-<ifindex>）是唯一无法从内核可见
-// 状态反推位置的东西，能用配置定位就精确用它。
-func uninstallPinDir(cfgPath, fallback string) string {
-	cfg, err := LoadConfig(cfgPath)
-	if err != nil {
+// 读得出来且安全时用配置里的 pin.dir：pin 文件（tcx-<ifindex>）是唯一无法从内核
+// 可见状态反推位置的东西，能用配置定位就精确用它。
+func uninstallPinDir(cfgPath, fallback string) (string, error) {
+	var fc struct {
+		Pin struct {
+			Dir string `toml:"dir"`
+		} `toml:"pin"`
+	}
+	if _, err := toml.DecodeFile(cfgPath, &fc); err != nil {
 		slog.Warn("uninstall: config unreadable, cleaning the default pin dir only; pass a valid -config to clean a custom pin.dir",
 			"config", cfgPath, "pin_dir", fallback, "err", err)
-		return fallback
+		return fallback, nil
 	}
-	return cfg.Pin.Dir
+	if fc.Pin.Dir == "" {
+		return fallback, nil // 没写 pin.dir：LoadConfig 也会用这个默认值
+	}
+	if !validPinDir(fc.Pin.Dir) {
+		return "", fmt.Errorf("config %s: pin.dir %q is not a safe cleanup target (want an absolute path with at least two elements, e.g. %s)", cfgPath, fc.Pin.Dir, fallback)
+	}
+	return fc.Pin.Dir, nil
 }

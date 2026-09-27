@@ -18,7 +18,7 @@
 // 第 6 步提前，一次配置笔误就能让守护进程在授权通路还没起来时先丢包。
 //
 // 因此下面每一步的失败路径都必须**早于**第 6 步返回（非零退出码 + 大声报错），
-// 且第 6 步成功后 run() 再也没有任何非 nil 返回——见文件末尾的自检清单。
+// 且第 6 步成功后 run() 只剩下"信号触发的正常关闭"这一条返回路径（返回 nil）。
 //
 // 顺序之外还有一处同样属于安全前提的检查：信号可能在 [4] 之后、[6] 之前到达
 // （ctx 已被取消，但 run 还在往下走）。abortIfShuttingDown 让 run 在这种情况下
@@ -199,6 +199,12 @@ func run(cfgPath, metricsAddr string) error {
 	if err := abortIfShuttingDown(ctx); err != nil {
 		return err
 	}
+	// 装 drop 规则之前的最后一句人话：这个组合会让某个受保护端口对**所有人**
+	// 永久 drop（包括管理员），而进程、日志、退出码全都正常。宁可在这里吵，
+	// 也不要在装完之后才发现门锁上了、钥匙没了。
+	for _, w := range policyWarnings(cfg) {
+		slog.Warn("policy warning", "detail", w)
+	}
 	fw := knoknft.New()
 	if err := fw.EnsureProtectedPorts(cfg.Listen.ProtectedPorts, cfg.Listen.SPAUDPPort); err != nil {
 		return fmt.Errorf("firewall: %w", err)
@@ -207,7 +213,7 @@ func run(cfgPath, metricsAddr string) error {
 		"spa_port", cfg.Listen.SPAUDPPort)
 
 	if metricsAddr != "" {
-		go serveMetrics(metricsAddr, objs)
+		go serveMetrics(metricsAddr, objs, src)
 	}
 
 	<-ctx.Done()
@@ -224,11 +230,17 @@ func run(cfgPath, metricsAddr string) error {
 	return nil
 }
 
-// serveMetrics 暴露数据面的 eBPF 计数器（Task 7 的 stats map）。
+// serveMetrics 暴露数据面的 eBPF 计数器（Task 7 的 stats map）与 Go 侧 ringbuf
+// 消费者的计数器。
+//
+// 两组指标刻意放在一起：eBPF 的 StRingbufDrop 只在**内核保留失败**时增长，而
+// ringbuf 读失败、ABI 漂移导致的样本解析失败都只发生在 Go 侧——只看内核计数器
+// 的话，"数据面在交事件、Go 侧一条都没收到"是看不见的（而它正是 C↔Go 契约漂移
+// 唯一的运行期信号：契约由 internal/platform/ebpf/contract_test.go 静态钉住）。
 //
 // 指标服务是旁路：绑定失败或写入失败都只影响可观测性，绝不影响授权与丢包裁决，
 // 因此这里把错误打成 warn 后就地返回，不让它有机会升级成进程级失败。
-func serveMetrics(addr string, objs *ebpfplat.KnokObjects) {
+func serveMetrics(addr string, objs *ebpfplat.KnokObjects, src *ebpfplat.RingbufSource) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		st, err := ebpfplat.ReadStats(objs)
@@ -242,6 +254,13 @@ func serveMetrics(addr string, objs *ebpfplat.KnokObjects) {
 		fmt.Fprintln(w, "# TYPE knok_packets_total counter")
 		for i, n := range names {
 			fmt.Fprintf(w, "knok_packets_total{slot=%q} %d\n", n, st[i])
+		}
+		if src != nil {
+			fmt.Fprintln(w, "# HELP knok_ringbuf_go_total Go-side ringbuf consumer counters")
+			fmt.Fprintln(w, "# TYPE knok_ringbuf_go_total counter")
+			fmt.Fprintf(w, "knok_ringbuf_go_total{slot=%q} %d\n", "read_errors", src.ReadErrors.Load())
+			fmt.Fprintf(w, "knok_ringbuf_go_total{slot=%q} %d\n", "malformed", src.Malformed.Load())
+			fmt.Fprintf(w, "knok_ringbuf_go_total{slot=%q} %d\n", "dropped", src.Dropped.Load())
 		}
 	})
 	if err := http.ListenAndServe(addr, mux); err != nil {
@@ -271,25 +290,60 @@ func (realClock) Now() time.Time { return time.Now() }
 //  3. 收尾复核（uninstallVerified）：报告成功之前先验证两个后端都不再报 knok
 //     附着，而不是"相信每一步都返回了 nil"。
 //
+// 唯一的例外是 pin.dir 本身（finding A）：它是 os.RemoveAll 的目标，读得出来但
+// 过不了 validPinDir 时**拒绝删除任何 pinned 状态**（不是退回默认目录），其余
+// 回收照做，最后以退出码 3 报告"回收不完整"。
+//
 // 表本身不需要第二次查询：Uninstall 执行的是 add + delete，delete 失败一定会以
 // 非零退出把错误带回（下面据此置 failed），所以它的 nil 已经等价于"表已删除"。
 //
 // 每步都尽力执行（一步失败不跳过其余），最后统一以退出码 3 报告"回收不完整"：
 // 半途而废对运维是隐藏状态，宁愿让脚本红着，也不要让下一个认为"已经清干净了"。
 func mustUninstall(cfgPath string) {
-	pinDir := uninstallPinDir(cfgPath, ebpfplat.DefaultPinDir)
+	pinDir, pinErr := uninstallPinDir(cfgPath, ebpfplat.DefaultPinDir)
 
 	var failed bool
+	if pinErr != nil {
+		// pin.dir 不可信：拒绝删除 pinned 状态（全部：List/Detach/Unpin/RemoveAll
+		// 都以它为作用域），而不是退回默认目录——"配置说 A、实际删 B"本身就是
+		// 不可审计的行为。nftables 表与配置无关，继续回收。
+		slog.Error("uninstall: refusing to remove pinned state: config pin.dir failed the safety check",
+			"config", cfgPath, "err", pinErr)
+		failed = true
+	}
+
 	if err := knoknft.New().Uninstall(); err != nil {
 		slog.Error("uninstall: nftables table", "err", err)
 		failed = true
 	}
 
+	if pinErr == nil {
+		if !uninstallPinnedState(pinDir) {
+			failed = true
+		}
+	}
+
+	if failed {
+		slog.Error("uninstall incomplete: some kernel state may remain")
+		os.Exit(exitKernel)
+	}
+	slog.Info("uninstalled: nftables table, pinned links and maps removed", "pin_dir", pinDir)
+}
+
+// uninstallPinnedState 回收 pin 目录承载的全部状态：对账两个后端的附着（Detach
+// 与 Unpin 各调用一次）→ 删 pin 目录 → 复核无残留。返回 false 表示不完整。
+//
+// 删除点前**再次**跑 validPinDir（第二道闸，defense in depth）：这里的 pinDir 来自
+// uninstallPinDir，已经判过一次；但真正不可逆的动作就是下面这一句，将来若有人新增
+// 一个 pinDir 来源（或把它改成可被其它路径覆盖），也不能绕过这道判据直接 RemoveAll。
+func uninstallPinnedState(pinDir string) bool {
+	ok := true
+
 	for _, backend := range uninstallBackends() {
 		handles, err := backend.List(pinDir)
 		if err != nil {
 			slog.Error("uninstall: list attachments", "backend", backend.Kind(), "dir", pinDir, "err", err)
-			failed = true
+			ok = false
 			continue
 		}
 		for _, h := range handles {
@@ -299,12 +353,12 @@ func mustUninstall(cfgPath string) {
 			// 调用同样无害。
 			if err := backend.Detach(h); err != nil {
 				slog.Error("uninstall: detach", "backend", backend.Kind(), "iface", h.IfName, "err", err)
-				failed = true
+				ok = false
 			}
-			if u, ok := backend.(ebpfplat.Unpinner); ok {
+			if u, isUnpinner := backend.(ebpfplat.Unpinner); isUnpinner {
 				if err := u.Unpin(h, pinDir); err != nil {
 					slog.Error("uninstall: unpin", "backend", backend.Kind(), "iface", h.IfName, "err", err)
-					failed = true
+					ok = false
 				}
 			}
 		}
@@ -313,19 +367,18 @@ func mustUninstall(cfgPath string) {
 	// pin 目录里同时住着 maps 与 link 的 pin；删目录即回收内核对象（两者的引用
 	// 都只由 pin 持有）。目录不存在时 RemoveAll 返回 nil，所以重复 uninstall 是
 	// 干净的空操作。
-	if err := os.RemoveAll(pinDir); err != nil {
+	if !validPinDir(pinDir) {
+		slog.Error("uninstall: pin dir failed the safety check at the deletion point; nothing was deleted", "dir", pinDir)
+		ok = false
+	} else if err := os.RemoveAll(pinDir); err != nil {
 		slog.Error("uninstall: remove pin dir", "dir", pinDir, "err", err)
-		failed = true
+		ok = false
 	}
 
 	if !uninstallVerified(pinDir) {
-		failed = true
+		ok = false
 	}
-	if failed {
-		slog.Error("uninstall incomplete: some kernel state may remain")
-		os.Exit(exitKernel)
-	}
-	slog.Info("uninstalled: nftables table, pinned links and maps removed", "pin_dir", pinDir)
+	return ok
 }
 
 // uninstallBackends 返回需要清理的全部后端实现，与 DetectBackend() 当前会选谁无关
