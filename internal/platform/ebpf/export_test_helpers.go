@@ -83,6 +83,14 @@ func TCXPinPathForTest(pinDir string, ifindex int) string {
 // 供外部集成测试独立地数内核里的 knok filter。
 const KnokFilterNameForTest = clsactFilterName
 
+// TCXSupportedForTest 暴露内核版本判定，供外部集成测试据**同一个**规则推导
+// DetectBackend 的期望后端（测试包在包外，取不到 tcxSupported）。
+func TCXSupportedForTest(release string) bool { return tcxSupported(release) }
+
+// ForceClsactForTest 暴露强制开关的真值判定，语义与 DetectBackend 完全一致
+// （只有 "1"/"true" 算置位）。
+func ForceClsactForTest() bool { return forceClsact() }
+
 // clearPinDir 删掉目录里的所有条目（保留目录本身）：吸收上一轮的 pin 残留。
 func clearPinDir(dir string) error {
 	ents, err := os.ReadDir(dir)

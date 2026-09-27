@@ -55,13 +55,12 @@ func TestAttachDetachLoopback(t *testing.T) {
 	kind := be.Kind()
 	t.Logf("backend=%s kernel=%s ifindex=%d pinDir=%s", kind, kernelRelease(t), ifindex, pinDir)
 
-	// DetectBackend 的选择必须与预期一致：6.8 上默认 tcx；KNOK_FORCE_CLSACT
-	// 置位时强制 clsact（这正是"在 TCX 可用的内核上验证兜底路径"的开关）。
-	want := "tcx"
-	forced := os.Getenv(ebpfplat.ForceClsactEnv) != ""
-	if forced {
-		want = "clsact"
-	}
+	// DetectBackend 的选择必须与预期一致。期望值由实现自身的两个判定推导
+	// （见 expectedBackendKindFor），不在测试里重述：重述过的副本会把
+	// "<6.6 内核 → tcx"（正确结果被判成失败）与 "KNOK_FORCE_CLSACT 非空即强制"
+	// （=0/=yes 时期望与实际分叉）两条 bug 带回来。
+	want := expectedBackendKindFor(kernelRelease(t))
+	forced := ebpfplat.ForceClsactForTest()
 	if kind != want {
 		t.Fatalf("DetectBackend() = %s, want %s (kernel %s, %s=%q)",
 			kind, want, kernelRelease(t), ebpfplat.ForceClsactEnv, os.Getenv(ebpfplat.ForceClsactEnv))
@@ -403,4 +402,22 @@ func kernelRelease(t *testing.T) string {
 		t.Fatalf("read osrelease: %v", err)
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// expectedBackendKindFor 推导给定内核版本（release）下 DetectBackend 应当选出的
+// 后端，规则与 backend.go 完全同源：先问强制开关（ForceClsactForTest），再用
+// 6.6 分界（TCXSupportedForTest）。两个判定都取自实现，本函数只做组合，因此
+// 测试不会在实现改规则时继续断言旧规则，也不会在 <6.6 内核上把正确的 clsact
+// 判成失败。
+//
+// release 是参数而不是直接读内核，这样"期望是否跟着判定走"可以在没有 <6.6
+// 内核的机器上用合成版本号验证。
+func expectedBackendKindFor(release string) string {
+	if ebpfplat.ForceClsactForTest() {
+		return "clsact"
+	}
+	if ebpfplat.TCXSupportedForTest(release) {
+		return "tcx"
+	}
+	return "clsact"
 }

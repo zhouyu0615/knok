@@ -65,25 +65,58 @@ type Unpinner interface {
 // 忽略内核版本直接返回 clsact。用于在 6.6+ 内核上验证兜底路径。
 const ForceClsactEnv = "KNOK_FORCE_CLSACT"
 
+// forceClsact 报告强制开关是否置位。
+//
+// 只有 "1" 与 "true"（大小写不敏感）算置位；"0"、"yes"、"" 都不算。宽松的
+// "非空即真" 会让 KNOK_FORCE_CLSACT=0 意外退回 clsact——测试也必须用同一个
+// 判定推导期望值，否则 KNOK_FORCE_CLSACT=0 下期望与实际会分叉。
+func forceClsact() bool {
+	v := os.Getenv(ForceClsactEnv)
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// tcxSupported 判断内核版本是否支持 TCX：主.次 ≥ 6.6。
+//
+// release 是 uname 的 release 字段（如 "6.8.0-107-generic"）。解析不出主/次
+// 版本（格式不符或非数字）一律视为不支持，退回 clsact——宁可用确定性更强的
+// clsact，也不在一个版本未知的内核上试 TCX。
+func tcxSupported(release string) bool {
+	parts := strings.SplitN(release, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	maj, err1 := strconv.Atoi(parts[0])
+	min, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return maj > 6 || (maj == 6 && min >= 6)
+}
+
+// kernelRelease 读 uname 的 release 字段（读不到时返回空串，tcxSupported 会
+// 把它判为不支持）。
+func kernelRelease() string {
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(u.Release[:]), "\x00")
+}
+
 // DetectBackend：uname 主.次 ≥ 6.6 → TCX，否则 clsact。
 //
 // KNOK_FORCE_CLSACT=1 时无条件选 clsact——否则 TCX 可用的内核上，兜底后端
 // 永远没有机会被真实内核路径验证。
+//
+// 两个判定（forceClsact / tcxSupported）刻意与集成测试共用：测试据同一规则
+// 推导期望后端，不在测试里重述一遍（重述过的副本会在 <6.6 内核或
+// KNOK_FORCE_CLSACT=0 时把正确的选择判成失败）。
 func DetectBackend() AttachBackend {
-	if v := os.Getenv(ForceClsactEnv); v == "1" || strings.EqualFold(v, "true") {
+	if forceClsact() {
 		return &ClsactBackend{}
 	}
-	var u unix.Utsname
-	if err := unix.Uname(&u); err == nil {
-		rel := strings.TrimRight(string(u.Release[:]), "\x00")
-		parts := strings.SplitN(rel, ".", 3)
-		if len(parts) >= 2 {
-			maj, err1 := strconv.Atoi(parts[0])
-			min, err2 := strconv.Atoi(parts[1])
-			if err1 == nil && err2 == nil && (maj > 6 || (maj == 6 && min >= 6)) {
-				return &TCXBackend{}
-			}
-		}
+	if tcxSupported(kernelRelease()) {
+		return &TCXBackend{}
 	}
 	return &ClsactBackend{}
 }
