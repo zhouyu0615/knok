@@ -8,9 +8,9 @@ import (
 	"strings"
 )
 
-// EnsureProtectedPorts 用 nft -f - 做整表声明式替换：受保护的 TCP 端口无 mark
-// 即 drop（终局），SPA UDP 端口静默 drop。这是低频控制面操作（仅启动/配置变更
-// 时执行一次），与 fwknop 每包 fork/exec 的性质不同。
+// EnsureProtectedPorts 用 nft -f - 做整表声明式替换：受保护端口（tcp 与 udp 都有
+// 规则，见 RenderRuleset）无 mark 即 drop（终局），SPA UDP 端口静默 drop。这是低频
+// 控制面操作（仅启动/配置变更时执行一次），与 fwknop 每包 fork/exec 的性质不同。
 //
 // 只写 knok 独占的 inet knok 表，永不触碰用户自己的表。
 func (f *Firewall) EnsureProtectedPorts(protected []uint16, spaPort uint16) error {

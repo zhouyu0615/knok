@@ -373,6 +373,63 @@ func TestLoadConfigMissingFile(t *testing.T) {
 	}
 }
 
+// TestUninstallPinDir 钉住 -uninstall 的配置无关性：配置读不出来时退回默认 pin
+// 目录而不是中止。这是"配置被删/被写坏"这一恢复场景的可执行定义——uninstall 是
+// 运维在这种情况下唯一的回收通道，它不能被同一份坏配置挡住。
+//
+// fallback 是参数（生产侧传 ebpfplat.DefaultPinDir），所以本用例在 macOS 上也能跑。
+func TestUninstallPinDir(t *testing.T) {
+	const fallback = "/sys/fs/bpf/knok"
+
+	t.Run("missing file falls back", func(t *testing.T) {
+		got := uninstallPinDir(filepath.Join(t.TempDir(), "gone.toml"), fallback)
+		if got != fallback {
+			t.Errorf("uninstallPinDir(missing) = %q, want %q", got, fallback)
+		}
+	})
+
+	t.Run("malformed toml falls back", func(t *testing.T) {
+		// 结构性坏配置（TOML 都解析不了）：LoadConfig 一定会失败，回收必须照做。
+		got := uninstallPinDir(writeCfg(t, "[keys\npsk = 1\n"), fallback)
+		if got != fallback {
+			t.Errorf("uninstallPinDir(malformed) = %q, want %q", got, fallback)
+		}
+	})
+
+	t.Run("structurally invalid falls back", func(t *testing.T) {
+		// 通过 TOML 解析但过不了结构校验（缺 interfaces）——同样是"起不来"的配置。
+		got := uninstallPinDir(writeCfg(t, "[keys]\npsk = \"hex:"+validPSKHex+"\"\n"), fallback)
+		if got != fallback {
+			t.Errorf("uninstallPinDir(no interfaces) = %q, want %q", got, fallback)
+		}
+	})
+
+	t.Run("valid config uses its pin.dir", func(t *testing.T) {
+		body := minCfg + "[pin]\ndir = \"/sys/fs/bpf/knok-e2e\"\n"
+		if got := uninstallPinDir(writeCfg(t, body), fallback); got != "/sys/fs/bpf/knok-e2e" {
+			t.Errorf("uninstallPinDir(valid) = %q, want /sys/fs/bpf/knok-e2e", got)
+		}
+	})
+
+	t.Run("valid config without pin.dir uses the parsed default", func(t *testing.T) {
+		// 配置有效但没写 [pin]：用 LoadConfig 填的默认值（与 fallback 同值，
+		// 但这条路径证明它来自配置的默认填充，而不是"配置读失败"）。
+		if got := uninstallPinDir(writeCfg(t, minCfg), fallback); got != fallback {
+			t.Errorf("uninstallPinDir(default) = %q, want %q", got, fallback)
+		}
+	})
+
+	t.Run("bad psk and bad durations do not block clean-up", func(t *testing.T) {
+		// PSK 与时长不是结构校验的一部分：这类配置能让 run() 退出 2，但 -uninstall
+		// 必须照常工作，并使用配置里的 pin.dir。
+		body := "[keys]\npsk = \"deadbeef\"\n[interfaces]\nmode = \"explicit\"\nexplicit = [\"lo\"]\n" +
+			"[policy]\nmax_ttl = \"5minutes\"\n[pin]\ndir = \"/sys/fs/bpf/knok-e2e\"\n"
+		if got := uninstallPinDir(writeCfg(t, body), fallback); got != "/sys/fs/bpf/knok-e2e" {
+			t.Errorf("uninstallPinDir(bad psk/duration) = %q, want /sys/fs/bpf/knok-e2e", got)
+		}
+	})
+}
+
 func decodeHex(t *testing.T, s string) [32]byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)

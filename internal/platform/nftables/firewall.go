@@ -37,6 +37,10 @@ func New() *Firewall { return &Firewall{} }
 // 自己的策略）；无 mark 的包落到 drop（终局），用户防火墙根本看不到未授权包。
 // SPA 端口同样 drop 以保持静默（不泄漏 ICMP port unreachable）。
 //
+// 受保护端口的 drop **两种协议都要渲染**（Ruling 26）：spec 的"无 mark 即 drop"
+// 契约里没有协议限定词，数据面也对 tcp/udp 都打 mark。只写 tcp 会让一个受保护的
+// UDP 端口对所有人大开——而命令与日志都显示成功，是最难发现的那种静默失败。
+//
 // 匹配的 mark 取自 internal/platform/mark（Ruling 22）：它与 eBPF 数据面写进
 // skb->mark 的值是同一份常量，两侧各自硬编码会静默漂移——mark 对不上时
 // 已授权流量会落到下面的 drop 规则被丢弃。
@@ -54,7 +58,12 @@ func RenderRuleset(protected []uint16, spaPort uint16) string {
 		for i, p := range ports {
 			strs[i] = strconv.Itoa(int(p))
 		}
-		fmt.Fprintf(&b, "    tcp dport { %s } drop\n", strings.Join(strs, ", "))
+		// 端口集合渲染一次、协议各写一行：nft 的集合字面量不支持"按协议展开"，
+		// 而把 tcp/udp 合成一条 inet 规则（`meta l4proto { tcp, udp } th dport {...}`）
+		// 在可读性与后续审计上都更差——两行是这里最直白的表达。
+		join := strings.Join(strs, ", ")
+		fmt.Fprintf(&b, "    tcp dport { %s } drop\n", join)
+		fmt.Fprintf(&b, "    udp dport { %s } drop\n", join)
 	}
 	fmt.Fprintf(&b, "    udp dport %d drop\n", spaPort) // SPA 端口静默（不回 ICMP）
 	b.WriteString("  }\n")

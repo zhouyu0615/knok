@@ -20,6 +20,7 @@ func TestRenderRuleset(t *testing.T) {
 		"type filter hook input priority -200",
 		"meta mark 0x4b4e4f4b accept",
 		"tcp dport { 22, 2222 } drop",
+		"udp dport { 22, 2222 } drop",
 		"udp dport 4242 drop",
 	} {
 		if !strings.Contains(got, want) {
@@ -28,17 +29,32 @@ func TestRenderRuleset(t *testing.T) {
 	}
 }
 
+// 受保护端口的裁决必须**同时**覆盖 tcp 与 udp：spec 的"无 mark 即 drop"契约不区分
+// 协议，而 eBPF 数据面对两种协议都打 mark（M2 起 TCP 也打）——只渲染 tcp 规则会让
+// 一个"受保护"的 UDP 端口对所有人大开，而命令看起来成功。
+func TestRenderRulesetDropsBothProtocolsForEveryProtectedPort(t *testing.T) {
+	got := knoknft.RenderRuleset([]uint16{2222}, 4242)
+	for _, want := range []string{"tcp dport { 2222 } drop", "udp dport { 2222 } drop"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("protected port 2222 not dropped for both protocols, missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRenderRulesetSortsAndDeduplicates(t *testing.T) {
 	got := knoknft.RenderRuleset([]uint16{2222, 22, 2222, 22}, 4242)
-	if !strings.Contains(got, "tcp dport { 22, 2222 } drop") {
-		t.Errorf("protected ports not sorted/deduplicated:\n%s", got)
+	for _, want := range []string{"tcp dport { 22, 2222 } drop", "udp dport { 22, 2222 } drop"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("protected ports not sorted/deduplicated, missing %q:\n%s", want, got)
+		}
 	}
 }
 
 func TestRenderRulesetNoProtectedPorts(t *testing.T) {
 	got := knoknft.RenderRuleset(nil, 4242)
-	if strings.Contains(got, "tcp dport") {
-		t.Errorf("empty protected set must not render a tcp rule:\n%s", got)
+	// "dport {" 只在受保护端口的多值集合里出现；SPA 端口是单值规则。
+	if strings.Contains(got, "dport {") {
+		t.Errorf("empty protected set must not render a protected-port rule:\n%s", got)
 	}
 	if !strings.Contains(got, "udp dport 4242 drop") {
 		t.Errorf("SPA port must stay dropped:\n%s", got)
@@ -56,9 +72,11 @@ func TestRenderRulesetMarkAcceptPrecedesDrops(t *testing.T) {
 	got := knoknft.RenderRuleset([]uint16{22}, 4242)
 	accept := strings.Index(got, "meta mark 0x4b4e4f4b accept")
 	tcpDrop := strings.Index(got, "tcp dport { 22 } drop")
-	udpDrop := strings.Index(got, "udp dport 4242 drop")
-	if accept < 0 || tcpDrop < 0 || udpDrop < 0 || accept > tcpDrop || tcpDrop > udpDrop {
-		t.Errorf("rule order accept < tcp drop < udp drop violated (accept=%d tcp=%d udp=%d):\n%s",
-			accept, tcpDrop, udpDrop, got)
+	udpDrop := strings.Index(got, "udp dport { 22 } drop")
+	spaDrop := strings.Index(got, "udp dport 4242 drop")
+	if accept < 0 || tcpDrop < 0 || udpDrop < 0 || spaDrop < 0 ||
+		accept > tcpDrop || tcpDrop > udpDrop || udpDrop > spaDrop {
+		t.Errorf("rule order accept < tcp drop < udp drop < spa drop violated (accept=%d tcp=%d udp=%d spa=%d):\n%s",
+			accept, tcpDrop, udpDrop, spaDrop, got)
 	}
 }

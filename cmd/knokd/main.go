@@ -19,6 +19,10 @@
 //
 // 因此下面每一步的失败路径都必须**早于**第 6 步返回（非零退出码 + 大声报错），
 // 且第 6 步成功后 run() 再也没有任何非 nil 返回——见文件末尾的自检清单。
+//
+// 顺序之外还有一处同样属于安全前提的检查：信号可能在 [4] 之后、[6] 之前到达
+// （ctx 已被取消，但 run 还在往下走）。abortIfShuttingDown 让 run 在这种情况下
+// 带着非零退出码返回，而不是把 drop 规则装上——否则就是"门锁了、钥匙服务已经停"。
 package main
 
 import (
@@ -44,6 +48,8 @@ import (
 // 退出码约定（Task 9 的对外契约）：0 正常；2 配置错（用户可修）；3 内核/权限/
 // 数据面不可用（环境问题）。区分二者的价值在于"谁该去看"——2 是运维改配置，
 // 3 是换内核/提权。
+//
+// -uninstall 只产出 0 与 3：它是恢复通道，一份坏配置不是中止理由（见 mustUninstall）。
 const (
 	exitConfig = 2
 	exitKernel = 3
@@ -75,18 +81,12 @@ func main() {
 	}
 }
 
-// configError 标记"用户可修"的失败（配置解析/校验/接口不存在）。main 用它把
-// 退出码分成 2 与 3；errors.As 穿透 fmt.Errorf 的包装，所以 run() 内部怎么包都行。
-type configError struct{ err error }
-
-func (e *configError) Error() string { return e.err.Error() }
-func (e *configError) Unwrap() error { return e.err }
-
 // run 执行完整启动序列并在前台阻塞到进程被信号终止。
 //
 // 返回非 nil 等价于"knokd 没能进入服务态"：调用方据此非零退出。唯一能让它带着
 // 已安装的防火墙返回的路径是信号触发的正常关闭（返回 nil）——所以不存在"装了
-// drop 规则但进程立刻退出"的组合。
+// drop 规则但进程立刻退出"的组合。信号若在 [4] 之后、[6] 之前到达，闸门会让
+// run 在**不装**规则的前提下返回非 nil（见 abortIfShuttingDown）。
 func run(cfgPath, metricsAddr string) error {
 	// [1] 配置与密钥（失败不动内核状态）。
 	// ResolveInterfaces 也排在这里：它是只读的 netlink 查询，把"网卡名写错"这类
@@ -173,6 +173,13 @@ func run(cfgPath, metricsAddr string) error {
 	// [5] 逃生通道：admin_allow 永久放行（必须在防火墙之前！）。
 	// 顺序是安全相关的：管理地址的 GrantForever 一旦落在 drop 规则之后，中间那段
 	// 窗口里"唯一能进来的人"会被自己的防火墙挡住——而这正是最需要它可用的时刻。
+	//
+	// 闸门（见 abortIfShuttingDown）：从 authenticator 起来到防火墙装好之间到达的
+	// 信号，会让"drop 规则已生效、授权通路已经停了"成立——那是全文件最想避免的
+	// 状态。放行与装规则都动内核状态，所以在进入这一段之前先问一次 ctx。
+	if err := abortIfShuttingDown(ctx); err != nil {
+		return err
+	}
 	for _, p := range cfg.Listen.ProtectedPorts {
 		for _, a := range adminAddrs {
 			if err := allowlist.GrantForever(a, p); err != nil {
@@ -184,7 +191,14 @@ func run(cfgPath, metricsAddr string) error {
 
 	// [6] 最后一步才装防火墙（此前任何失败都 fail-open）。
 	// 这是全文件唯一写内核裁决状态的地方，也是启动序列的终点：它成功后 run 不再
-	// 有任何非 nil 返回。
+	// 有任何非 nil 返回（唯一的例外是信号触发的正常关闭）。
+	//
+	// 第二道闸门就在安装动作之前：上面的 GrantForever 只是映射写入（放行方向，
+	// 无害），而这一句是最后能撤回的机会——ctx 已取消时宁可退出并把"没有装规则"
+	// 写进日志，也不要留下无人能授权的 drop 规则。
+	if err := abortIfShuttingDown(ctx); err != nil {
+		return err
+	}
 	fw := knoknft.New()
 	if err := fw.EnsureProtectedPorts(cfg.Listen.ProtectedPorts, cfg.Listen.SPAUDPPort); err != nil {
 		return fmt.Errorf("firewall: %w", err)
@@ -239,20 +253,31 @@ type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
-// mustUninstall 是 -uninstall 的完整回收路径：拆表 → 摘附着 → 删 pin 目录。
+// mustUninstall 是 -uninstall 的完整回收路径：拆表 → 摘附着（两个后端都查）→
+// 删 pin 目录 → 复核无残留。
 //
 // 顺序与安装相反，且**防火墙先拆**是刻意的：只要 inet knok 表还在，受保护端口
 // 无 mark 即 drop。若先摘数据面再拆表，中间窗口里 drop 规则仍在、却没有任何东西
 // 能打 mark——那是"看着有授权、实际全丢"的坏 fail-closed，比不装规则更糟。
 //
+// 三条让"真的清干净了"成立的机制：
+//
+//  1. 回收不依赖配置可用（见 uninstallPinDir）：配置被删掉、或写坏到起不来，恰恰
+//     是最需要拆墙的时刻——此时唯一可用的回收通道不能被同一份坏配置挡住。
+//  2. **两个后端都查**，而不是只查 DetectBackend() 选中的那个：附着是跨内核升级
+//     存活的，在 6.6 边界另一侧装上的 cls_bpf filter，用"当前内核会选 TCX"的
+//     List 是看不见的。只查一个后端 = 残留 + 假成功，而这条路径正是运维在故障
+//     时刻最需要它可靠的地方。
+//  3. 收尾复核（uninstallVerified）：报告成功之前先验证两个后端都不再报 knok
+//     附着，而不是"相信每一步都返回了 nil"。
+//
+// 表本身不需要第二次查询：Uninstall 执行的是 add + delete，delete 失败一定会以
+// 非零退出把错误带回（下面据此置 failed），所以它的 nil 已经等价于"表已删除"。
+//
 // 每步都尽力执行（一步失败不跳过其余），最后统一以退出码 3 报告"回收不完整"：
 // 半途而废对运维是隐藏状态，宁愿让脚本红着，也不要让下一个认为"已经清干净了"。
 func mustUninstall(cfgPath string) {
-	cfg, err := LoadConfig(cfgPath)
-	if err != nil {
-		slog.Error("uninstall: config", "err", err)
-		os.Exit(exitConfig)
-	}
+	pinDir := uninstallPinDir(cfgPath, ebpfplat.DefaultPinDir)
 
 	var failed bool
 	if err := knoknft.New().Uninstall(); err != nil {
@@ -260,25 +285,27 @@ func mustUninstall(cfgPath string) {
 		failed = true
 	}
 
-	backend := ebpfplat.DetectBackend()
-	handles, err := backend.List(cfg.Pin.Dir)
-	if err != nil {
-		slog.Error("uninstall: list attachments", "dir", cfg.Pin.Dir, "err", err)
-		failed = true
-	}
-	for _, h := range handles {
-		// Detach 与 Unpin 都调用是安全的：cilium 的 FD.Close 幂等（第二次是
-		// no-op），而 TCX 的存活恰恰依赖"Detach 不删 pin、Unpin 才删 pin"的分工
-		// （Ruling 5）。clsact 没有 pin，二者的效果等价（都是删 filter），重复
-		// 调用同样无害。
-		if err := backend.Detach(h); err != nil {
-			slog.Error("uninstall: detach", "iface", h.IfName, "err", err)
+	for _, backend := range uninstallBackends() {
+		handles, err := backend.List(pinDir)
+		if err != nil {
+			slog.Error("uninstall: list attachments", "backend", backend.Kind(), "dir", pinDir, "err", err)
 			failed = true
+			continue
 		}
-		if u, ok := backend.(ebpfplat.Unpinner); ok {
-			if err := u.Unpin(h, cfg.Pin.Dir); err != nil {
-				slog.Error("uninstall: unpin", "iface", h.IfName, "err", err)
+		for _, h := range handles {
+			// Detach 与 Unpin 都调用是安全的：cilium 的 FD.Close 幂等（第二次是
+			// no-op），而 TCX 的存活恰恰依赖"Detach 不删 pin、Unpin 才删 pin"的分工
+			// （Ruling 5）。clsact 没有 pin，二者的效果等价（都是删 filter），重复
+			// 调用同样无害。
+			if err := backend.Detach(h); err != nil {
+				slog.Error("uninstall: detach", "backend", backend.Kind(), "iface", h.IfName, "err", err)
 				failed = true
+			}
+			if u, ok := backend.(ebpfplat.Unpinner); ok {
+				if err := u.Unpin(h, pinDir); err != nil {
+					slog.Error("uninstall: unpin", "backend", backend.Kind(), "iface", h.IfName, "err", err)
+					failed = true
+				}
 			}
 		}
 	}
@@ -286,16 +313,48 @@ func mustUninstall(cfgPath string) {
 	// pin 目录里同时住着 maps 与 link 的 pin；删目录即回收内核对象（两者的引用
 	// 都只由 pin 持有）。目录不存在时 RemoveAll 返回 nil，所以重复 uninstall 是
 	// 干净的空操作。
-	if err := os.RemoveAll(cfg.Pin.Dir); err != nil {
-		slog.Error("uninstall: remove pin dir", "dir", cfg.Pin.Dir, "err", err)
+	if err := os.RemoveAll(pinDir); err != nil {
+		slog.Error("uninstall: remove pin dir", "dir", pinDir, "err", err)
 		failed = true
 	}
 
+	if !uninstallVerified(pinDir) {
+		failed = true
+	}
 	if failed {
 		slog.Error("uninstall incomplete: some kernel state may remain")
 		os.Exit(exitKernel)
 	}
-	slog.Info("uninstalled: nftables table, pinned links and maps removed")
+	slog.Info("uninstalled: nftables table, pinned links and maps removed", "pin_dir", pinDir)
+}
+
+// uninstallBackends 返回需要清理的全部后端实现，与 DetectBackend() 当前会选谁无关
+// ——回收要覆盖"曾经装上的是谁"（见 mustUninstall 第 2 条）。
+func uninstallBackends() []ebpfplat.AttachBackend {
+	return []ebpfplat.AttachBackend{&ebpfplat.TCXBackend{}, &ebpfplat.ClsactBackend{}}
+}
+
+// uninstallVerified 复核没有 knok 附着残留：两个后端都必须报"零附着"。
+//
+// 它的存在是为了不把"每步都返回了 nil"当成"内核里已经干净"——clsact 的 filter
+// 与 TCX 的 pin 都可能因为后端判断错、pin 目录写错或权限问题而活下来，而这些
+// 恰恰是 exit 0 会掩盖的失败。
+func uninstallVerified(pinDir string) bool {
+	ok := true
+	for _, backend := range uninstallBackends() {
+		handles, err := backend.List(pinDir)
+		if err != nil {
+			slog.Error("uninstall: verify list", "backend", backend.Kind(), "dir", pinDir, "err", err)
+			ok = false
+			continue
+		}
+		if len(handles) > 0 {
+			slog.Error("uninstall: knok attachments still present",
+				"backend", backend.Kind(), "count", len(handles))
+			ok = false
+		}
+	}
+	return ok
 }
 
 var _ ports.Clock = realClock{}

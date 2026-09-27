@@ -3,12 +3,24 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
 )
+
+// configError 标记"用户可修"的失败（配置解析/校验/接口不存在）。main 用它把退出码
+// 分成 2（改配置）与 3（换内核/提权）；errors.As 穿透 fmt.Errorf 的包装，所以 run()
+// 内部怎么包都行。
+//
+// 它与本文件其余部分一样不带构建标签：配置层的概念不依赖平台，而放在这里也让
+// 与配置无关的判定（startup_gate.go 的信号闸门）能在任何平台上断言"这不是配置错"。
+type configError struct{ err error }
+
+func (e *configError) Error() string { return e.err.Error() }
+func (e *configError) Unwrap() error { return e.err }
 
 // Config 是 /etc/knok/knokd.toml 的映射。
 //
@@ -126,4 +138,26 @@ func (c *Config) AdminAddrs() ([]netip.Addr, error) {
 		out = append(out, p.Addr())
 	}
 	return out, nil
+}
+
+// uninstallPinDir 解析 -uninstall 该清理哪个 pin 目录。
+//
+// 回收路径刻意**不依赖配置可用**：配置被删掉、或写坏到起不来，恰恰是最需要把
+// 防火墙拆掉的时刻（否则只能手敲 nft delete table inet knok）。防火墙表与 tc/
+// clsact 附着都不需要配置就能回收，所以配置读不出来时这里只退化为 fallback
+// （ebpfplat.DefaultPinDir）并记一条 warn，绝不中止。
+//
+// fallback 由调用方传入而不是在这里直接引用 ebpfplat.DefaultPinDir：本文件不带
+// 构建标签（判定与平台无关、可在 macOS 上单测），而 ebpfplat 是 Linux 专属包。
+//
+// 读得出来时用配置里的 pin.dir：pin 文件（tcx-<ifindex>）是唯一无法从内核可见
+// 状态反推位置的东西，能用配置定位就精确用它。
+func uninstallPinDir(cfgPath, fallback string) string {
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		slog.Warn("uninstall: config unreadable, cleaning the default pin dir only; pass a valid -config to clean a custom pin.dir",
+			"config", cfgPath, "pin_dir", fallback, "err", err)
+		return fallback
+	}
+	return cfg.Pin.Dir
 }
