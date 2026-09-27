@@ -17,12 +17,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-)
 
-// MarkHex 是 eBPF 数据面为已授权流量写入的 meta mark（"KNOK" 的 ASCII）。
-// 它必须与 internal/platform/ebpf 设置的 skb->mark 完全一致：mark 不匹配的包
-// 命不中 accept 规则，会落到下面的 drop 规则被丢弃。
-const MarkHex = "0x4b4e4f4b"
+	"github.com/zhouyu0615/knok/internal/platform/mark"
+)
 
 // Firewall 是 ports.Firewall 的 nftables 实现。它无状态：每次调用都做整表
 // 声明式替换（幂等），不缓存任何东西。
@@ -39,6 +36,10 @@ func New() *Firewall { return &Firewall{} }
 // 但必须排在 drop 之前——marked 包命中 accept 后继续走用户的链（用户仍可叠加
 // 自己的策略）；无 mark 的包落到 drop（终局），用户防火墙根本看不到未授权包。
 // SPA 端口同样 drop 以保持静默（不泄漏 ICMP port unreachable）。
+//
+// 匹配的 mark 取自 internal/platform/mark（Ruling 22）：它与 eBPF 数据面写进
+// skb->mark 的值是同一份常量，两侧各自硬编码会静默漂移——mark 对不上时
+// 已授权流量会落到下面的 drop 规则被丢弃。
 func RenderRuleset(protected []uint16, spaPort uint16) string {
 	ports := dedupeSorted(protected)
 	var b strings.Builder
@@ -47,7 +48,7 @@ func RenderRuleset(protected []uint16, spaPort uint16) string {
 	b.WriteString("table inet knok {\n")
 	b.WriteString("  chain input {\n")
 	b.WriteString("    type filter hook input priority -200; policy accept;\n")
-	fmt.Fprintf(&b, "    meta mark %s accept\n", MarkHex)
+	fmt.Fprintf(&b, "    meta mark %s accept\n", mark.Hex)
 	if len(ports) > 0 {
 		strs := make([]string, len(ports))
 		for i, p := range ports {

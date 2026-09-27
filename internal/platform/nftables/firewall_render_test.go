@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/zhouyu0615/knok/internal/core/ports"
+	"github.com/zhouyu0615/knok/internal/platform/mark"
 	knoknft "github.com/zhouyu0615/knok/internal/platform/nftables"
 )
 
@@ -47,8 +48,10 @@ func TestRenderRulesetNoProtectedPorts(t *testing.T) {
 // mark accept 必须排在 drop 规则之前：accept 非终局（继续走用户链），
 // drop 是终局——顺序颠倒会让已授权流量被自己的表丢掉。
 func TestRenderRulesetMarkAcceptPrecedesDrops(t *testing.T) {
-	if knoknft.MarkHex != "0x4b4e4f4b" {
-		t.Fatalf("MarkHex = %q, must match the eBPF dataplane mark", knoknft.MarkHex)
+	// mark 值本身仍是独立钉住的字面量：共享常量（internal/platform/mark）
+	// 被改动时这里必须一起改，而不是跟着漂移。
+	if mark.Hex != "0x4b4e4f4b" {
+		t.Fatalf("mark.Hex = %q, must match the eBPF dataplane mark", mark.Hex)
 	}
 	got := knoknft.RenderRuleset([]uint16{22}, 4242)
 	accept := strings.Index(got, "meta mark 0x4b4e4f4b accept")
