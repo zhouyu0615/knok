@@ -296,4 +296,5 @@ Transport 抽象（两实现）：
 | 用户防火墙对受保护端口另有规则导致语义冲突 | 文档契约 + knokd 启动时检测冲突并 warn |
 | VPS 虚拟网卡 XDP/TCX 行为差异 | 首发 TCX ingress（虚拟网卡普遍支持），集成测试覆盖 |
 | 静态密钥简化版（M2）泄漏进 main 历史 | M2 密钥仅测试用常量，M3 立即替换，README 不提及 |
-| nftables priority 与用户已有高优先级链冲突 | -200 足够靠前；启动时 dump 钩子链检测并 warn |
+| **M2 的重放缓存是进程内内存**（已知限制，不修，M3 换 pinned/持久化存储）：daemon 重启即清空 nonce 记录，因此一个被捕获的 knock 只要仍在 `TSWindow`（默认 300s）内，就能在重启后被原样重放并被放行；授权按源 IP 写入 allowlist，重放者因此获得一段与原请求等长的访问权（source-IP rebinding）。暴露窗口 = 捕获者可重放 ∧ daemon 在该窗口内重启过 | 文档明说（README「Known limitations (M2)」+ `internal/core/auth/pipeline.go` 的 nonceCache 注释）；窗口有限（≤ TSWindow）且需要"捕获 + 重启"两个条件同时成立；M3 用 pinned/持久化的 nonce 表消除重启丢失记录这一半 |
+| nftables priority 与用户已有高优先级链冲突 | -200 足够靠前；启动时 dump 钩子链检测并 warn（**M2 尚未实现，契约靠文档**：见 README 的 `inet knok` 契约） |
