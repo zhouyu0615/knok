@@ -5,6 +5,7 @@ package ebpfplat
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -40,11 +41,57 @@ func tcxPinPath(pinDir string, ifindex int) string {
 // 复用而非重新附着是崩溃存活的另一半：knokd 重启时若重新 BPF_LINK_CREATE，
 // 内核里的 tcx 链会多出一条（tcx 允许同一 hook 上串多条 link），旧的那条
 // 还挂着旧程序与旧 map——既浪费又会让行为取决于 link 顺序。
+//
+// 复用有一个必须处理的例外（final review finding E）：pin 里的 link 挂着的是
+// **上一个进程加载的程序**（程序不 pin，每次启动都是一次新的 bpf_prog_load，
+// 因此 id 必然不同）。升级之后新进程写的 map 由新程序语义解释，而内核里跑的
+// 可能还是旧程序——旧程序的行为、旧 ABI 的解读都不会有任何日志。所以复用前先
+// 比程序 id：一致才原样复用；不一致时**原地换程序**（BPF_LINK_UPDATE：pin 与
+// 附着都不中断，也不存在"网卡上没有 knok 程序"的窗口——那个窗口里已授权流量
+// 拿不到 mark，会被 nftables 的 drop 规则丢掉）；原地替换不可用时才删 pin 重建。
 func (b *TCXBackend) Attach(ifindex int, prog *ebpf.Program, pinDir string) (Handle, error) {
 	pinPath := tcxPinPath(pinDir, ifindex)
 
-	if l, err := link.LoadPinnedLink(pinPath, nil); err == nil {
-		return Handle{IfIndex: ifindex, IfName: pinName(ifindex), Kind: b.Kind(), Link: l}, nil
+	pinned, loadErr := link.LoadPinnedLink(pinPath, nil)
+	switch {
+	case loadErr == nil:
+		h := Handle{IfIndex: ifindex, IfName: pinName(ifindex), Kind: b.Kind(), Link: pinned}
+		curID, haveCur := linkProgramID(pinned)
+		newID, haveNew := programID(prog)
+		if haveCur && haveNew && curID == newID {
+			return h, nil // 同一程序的 pin：原样复用
+		}
+		if !haveCur || !haveNew {
+			// 读不出任一侧的程序 id（ObjInfo 不可用）：无法判断漂移。保守地保留
+			// pin 并告警——"看不见"不等于"该删"，删错会中断生效中的附着。
+			slog.Warn("could not read a program id (pinned link or current program); keeping the pinned link as-is",
+				"iface", h.IfName, "pin", pinPath,
+				"have_pinned_id", haveCur, "have_current_id", haveNew)
+			return h, nil
+		}
+		if uerr := pinned.Update(prog); uerr == nil {
+			slog.Warn("pinned tcx link carried a different program id; replaced the kernel program in place (pinned grants untouched)",
+				"iface", h.IfName, "pin", pinPath,
+				"pinned_prog_id", uint32(curID), "current_prog_id", uint32(newID))
+			return h, nil
+		} else {
+			slog.Warn("pinned tcx link carries a different program and cannot be updated in place; replacing the pin",
+				"iface", h.IfName, "pin", pinPath,
+				"pinned_prog_id", uint32(curID), "current_prog_id", uint32(newID), "err", uerr)
+		}
+		// 链上的程序对不上且换不掉：删 pin（这个 link 的内核引用归零，旧附着随之
+		// 消失）再重建。这条 pin 刚刚加载成功过，所以这里是"替换一条活的 pin"，
+		// 而不是"清理死 pin"——上面的 warn 已经把这件事说出去了。
+		if rerr := os.Remove(pinPath); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			_ = pinned.Close()
+			return Handle{}, fmt.Errorf("replace pinned tcx link %s: %w", pinPath, rerr)
+		}
+		_ = pinned.Close()
+	case !pinUnusable(loadErr):
+		// 环境/瞬时错误（EMFILE/ENOMEM/EACCES…）：pin 很可能是一条**仍然生效的
+		// live link**。绝不能走"新建 + 覆盖同名 pin"的路径（那会先删掉它），
+		// 原样返回错误让调用方（knokd）大声失败。
+		return Handle{}, fmt.Errorf("load pinned tcx link %s (transient failure, pin left intact): %w", pinPath, loadErr)
 	}
 
 	l, err := link.AttachTCX(link.TCXOptions{
@@ -65,6 +112,44 @@ func (b *TCXBackend) Attach(ifindex int, prog *ebpf.Program, pinDir string) (Han
 	return Handle{IfIndex: ifindex, IfName: pinName(ifindex), Kind: b.Kind(), Link: l}, nil
 }
 
+// linkProgramID 读出一条 link 当前挂载的程序 id。ok=false 表示读不出来
+// （Info 不可用）——调用方必须据此保守处理，不能把"看不见"当作"可删除/可替换"。
+func linkProgramID(l link.Link) (ebpf.ProgramID, bool) {
+	info, err := l.Info()
+	if err != nil {
+		return 0, false
+	}
+	return info.Program, true
+}
+
+// programID 读出一个已加载程序的 id。cilium/ebpf v0.17 没有 Program.ID()，
+// 只能走 Info()（同一份内核对象元数据，代价是一次 bpf_prog_get_info_by_fd）。
+func programID(prog *ebpf.Program) (ebpf.ProgramID, bool) {
+	info, err := prog.Info()
+	if err != nil {
+		return 0, false
+	}
+	return info.ID()
+}
+
+// pinUnusable 报告"加载 pin 失败"是否说明 pin 确实不可用（因此可以重建）。
+//
+// 只有这种情况才允许走"新建 link 并覆盖同名 pin"的路径。EMFILE/ENFILE/ENOMEM/
+// EACCES/EPERM/EROFS/EBUSY 是环境或瞬时错误：pin 很可能是一条**仍然生效的 live
+// link**（另一个 knokd 用光了 fd，或本进程读不了 bpffs），删掉它就是中断一条正在
+// 工作的附着——升级时那意味着已授权流量立刻全部落到 drop 规则上。
+// ENOENT（没有 pin）与"pin 内容确实坏掉"归为可重建：前者根本不存在，后者重建是
+// 唯一出路。
+func pinUnusable(err error) bool {
+	transient := []error{unix.EMFILE, unix.ENFILE, unix.ENOMEM, unix.EACCES, unix.EPERM, unix.EROFS, unix.EBUSY}
+	for _, e := range transient {
+		if errors.Is(err, e) {
+			return false
+		}
+	}
+	return true
+}
+
 // pinLink 把 link 落盘到 bpffs。
 //
 // 计划草稿在这里写的是 `if os.MkdirAll(pinDir) == nil { _ = l.Pin(pinPath) }`
@@ -83,7 +168,14 @@ func pinLink(l link.Link, pinPath, pinDir string) error {
 	// 同名 pin 已存在但加载不了（例如 bpffs 重挂过、上一次非正常退出留下死
 	// pin）：能加载的 pin 在上面就被复用分支返回了，走到这里说明它不可用，
 	// 删掉死 pin 后重试一次，避免一个残留文件永久挡住重新附着。
+	//
+	// 删除之前**再确认一次**这条 pin 确实不可用（finding E 的另一半）：EEXIST
+	// 也可能来自"另一个进程刚建立了一条 live pin"（竞态）或"上面那次加载失败
+	// 是瞬时错误"。删掉别人的生效附着，比多报一个错误糟得多。
 	if errors.Is(err, unix.EEXIST) {
+		if _, lerr := link.LoadPinnedLink(pinPath, nil); lerr == nil || !pinUnusable(lerr) {
+			return fmt.Errorf("pin tcx link %s: %w (an existing usable pin was left intact)", pinPath, err)
+		}
 		if rerr := os.Remove(pinPath); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
 			return fmt.Errorf("pin tcx link %s: %w", pinPath, err)
 		}
