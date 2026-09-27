@@ -134,7 +134,7 @@ sudo ./knokd -uninstall -config /etc/knok/knokd.toml   # 拆表、摘附着、�
 
 ## 状态
 
-🚧 **早期开发中——已达 M2 里程碑。** 端到端流程在 Linux 上可用（TCX/TC + nftables）：一次敲门为受保护端口开一个有界 TTL，授权能跨守护进程重启存活，`scripts/e2e.sh`（`sudo make e2e`）会对着真实内核逐条验证这些行为。
+🚧 **早期开发中——v0.1（已达 M2 里程碑）。** 端到端流程在 Linux 上可用（TCX/TC + nftables）：一次敲门为受保护端口开一个有界 TTL，授权能跨守护进程重启存活，`scripts/e2e.sh`（`sudo make e2e`）会对着真实内核逐条验证这些行为。
 
 ```
 cmd/knok/       客户端 CLI（跨平台，纯 Go）

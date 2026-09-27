@@ -134,7 +134,7 @@ Two rules that keep you out of trouble: keep `safety.admin_allow` (or a cloud co
 
 ## Status
 
-🚧 **Early development — M2 milestone reached.** The end-to-end flow works over UDP on Linux (TCX/TC + nftables): a knock opens the hidden port for a bounded TTL, the grant survives a daemon restart, and `scripts/e2e.sh` (`sudo make e2e`) verifies exactly that against a live kernel.
+🚧 **Early development — v0.1 (M2 milestone reached).** The end-to-end flow works over UDP on Linux (TCX/TC + nftables): a knock opens the hidden port for a bounded TTL, the grant survives a daemon restart, and `scripts/e2e.sh` (`sudo make e2e`) verifies exactly that against a live kernel.
 
 ```
 cmd/knok/       client CLI (cross-platform, pure Go)

@@ -1,5 +1,6 @@
 @startuml knok-daemon-startup
 autonumber
+skin rose 
 title knokd 启动顺序不变量（安全前提：防火墙是最后一条腿）
 
 participant "run()" as R

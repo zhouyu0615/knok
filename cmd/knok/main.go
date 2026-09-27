@@ -1,4 +1,4 @@
-// Command knok 是 M2 最小客户端：只支持 PSK 模式，仅供开发联调。
+// Command knok 是 v0.1（M2）最小客户端：只支持 PSK 模式，仅供开发联调。
 // 生产协议（X25519 + Ed25519）在 M3 落地，见 spec §3。
 package main
 
@@ -18,8 +18,8 @@ import (
 	"github.com/zhouyu0615/knok/pkg/protocol"
 )
 
-// versionLine 必须一眼看出当前是开发用的 PSK 模式。
-const versionLine = "knok M2 (PSK mode - development only)"
+// versionLine 必须一眼看出两件事：当前是哪个版本，以及它还是开发用的 PSK 模式。
+const versionLine = "knok v0.1 — M2 (PSK mode - development only)"
 
 func main() {
 	if len(os.Args) < 2 {
