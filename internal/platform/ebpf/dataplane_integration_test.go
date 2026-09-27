@@ -5,6 +5,9 @@
 //
 //	sudo -E go test -tags=integration -count=1 -run TestDataplaneRoundTrip ./internal/platform/ebpf/ -v
 //
+// 同文件的 TestDataplaneTCPMark 是 TCP 打标通路的专项用例（M2 的 allowlist 打标
+// 必须对 TCP 与 UDP 一致生效），跑法把 -run 换成 TestDataplaneTCPMark。
+//
 // 它验证的是一条**内核里的**通路，而不是 Go 侧的模拟：加载 map（生产路径
 // LoadObjects）→ 在 lo 上 attach（Task 6 的后端）→ 写 cfg → magic UDP 包经 TC
 // ingress 上送 ringbuf → RingbufSource 解析成 CandidatePacket → MapAllowlist 授权
@@ -43,6 +46,189 @@ const (
 	itZeroPort    = 9996  // ttl <= 0 的授权 → List 必须不展示
 	itForeverPort = 9995  // GrantForever → List 的 Forever 分支
 )
+
+// TestDataplaneTCPMark 的用例端口（与上面的 UDP 端口错开：TCP 用例要真开监听，
+// 元组必须与其它用例互不干扰）。
+const (
+	itTCPGrantPort = 9994 // 已授权的 TCP 业务端口 → 必须走 allowlist 打标
+	itTCPOtherPort = 9993 // 未授权且非 SPA 的 TCP 端口 → 负例
+)
+
+// TestDataplaneTCPMark 证明 M2 的 allowlist 打标对 **TCP** 同样生效——这是
+// "knock → SSH 可达" 的验收前提：受保护业务端口多为 TCP（SSH 就是），
+// 而 nftables 的 `meta mark 0x4b4e4f4b accept` 之外的一切 TCP 到受保护端口都会被
+// drop。TCP 包若在内核里拿不到 skb->mark，授权写进 map 也白写。
+//
+// 断言主体是 stats 的 allow_hit 增量（mark 就是它的产物）；"connect 成功"本身
+// **不是**证据：本用例不装 nftables 表，没有 mark 的 TCP 连接照样能握手成功。
+// 负例与 SPA 边界同样钉住：
+//   - 未授权端口的 TCP 不命中；
+//   - TCP 永不进入 SPA 候选路径（magic 载荷的 TCP 报文到 cfg.spa_port 也不上送、
+//     不计 candidate），即 cfg.spa_port 只被 UDP 路径读取。
+func TestDataplaneTCPMark(t *testing.T) {
+	objs := ebpfplat.MustLoadForTest(t)
+
+	lo, err := netlink.LinkByName("lo")
+	if err != nil {
+		t.Skipf("no loopback: %v", err)
+	}
+	ifindex := lo.Attrs().Index
+
+	pinDir := ebpfplat.TestPinDir(t)
+	be := ebpfplat.DetectBackend()
+	t.Logf("backend=%s kernel=%s ifindex=%d pinDir=%s", be.Kind(), kernelRelease(t), ifindex, pinDir)
+
+	detachAll(be, ifindex, pinDir)
+	hadClsactQdisc := hasClsactQdisc(t, ifindex)
+	t.Cleanup(func() {
+		detachAll(be, ifindex, pinDir)
+		if !hadClsactQdisc {
+			removeClsactQdisc(ifindex)
+		}
+	})
+	baseLinks := countTCXLinks(t)
+
+	h, err := be.Attach(ifindex, objs.KnokIngress, pinDir)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	var tcxLinkID link.ID
+	if be.Kind() == "tcx" {
+		tcxLinkID = linkID(t, h)
+	}
+
+	if err := ebpfplat.WriteCfg(objs, itSPAPort, 46, 512); err != nil {
+		t.Fatalf("WriteCfg: %v", err)
+	}
+	src, err := ebpfplat.NewRingbufSource(objs.SpaEvents, 16)
+	if err != nil {
+		t.Fatalf("NewRingbufSource: %v", err)
+	}
+	defer src.Close()
+
+	allowedBy := netip.MustParseAddr("127.0.0.1")
+	al := ebpfplat.NewMapAllowlist(objs.Allowlist, testfakes.NewFakeClock(time.Now()))
+	if err := al.Grant(allowedBy, itTCPGrantPort, 30*time.Second); err != nil {
+		t.Fatalf("Grant(%v:%d): %v", allowedBy, itTCPGrantPort, err)
+	}
+
+	// ---- 1) TCP 业务流量：真实监听 + 真实握手 + allow_hit 必须前进 ----
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(itTCPGrantPort)))
+	if err != nil {
+		t.Fatalf("listen tcp 127.0.0.1:%d: %v", itTCPGrantPort, err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("tcp-ok\n"))
+			_ = c.Close()
+		}
+	}()
+
+	base := readStats(t, objs)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(itTCPGrantPort)), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial tcp 127.0.0.1:%d（已授权端口应当完成握手）: %v", itTCPGrantPort, err)
+	}
+	// 数据段也过同一个 hook（mark 在 ingress 上按包计算，不是只给 SYN）。读失败
+	// 只记日志：本用例的断言是 stats，不是应用的读写时序。
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if n, err := conn.Read(make([]byte, 8)); err != nil {
+		t.Logf("read banner: %v（不影响 stats 断言）", err)
+	} else {
+		t.Logf("已授权 TCP 连接收到 %d 字节 banner（握手 + 数据段都过了 hook）", n)
+	}
+	_ = conn.Close()
+
+	hit := waitStatAtLeast(t, objs, ebpfplat.StAllowHit, base[ebpfplat.StAllowHit]+1, 3*time.Second,
+		"授权 TCP 端口命中 allowlist（内核应打 skb->mark）")
+	t.Logf("TCP mark 通路: allow_hit %d → %d（端口 %d 的 TCP 包在内核命中并打标）",
+		base[ebpfplat.StAllowHit], hit[ebpfplat.StAllowHit], itTCPGrantPort)
+
+	// ---- 2) 负例：未授权且非 SPA 的 TCP 端口不得命中 ----
+	beforeNeg := readStats(t, objs)
+	if _, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(itTCPOtherPort)), 500*time.Millisecond); err != nil {
+		t.Logf("dial tcp 127.0.0.1:%d: %v（无监听 → RST，属预期；SYN 已过 TC ingress）", itTCPOtherPort, err)
+	}
+	total := waitStatAtLeast(t, objs, ebpfplat.StTotal, beforeNeg[ebpfplat.StTotal]+1, 3*time.Second,
+		"hook 仍在处理 lo 流量")
+	time.Sleep(200 * time.Millisecond)
+	afterNeg := readStats(t, objs)
+	if afterNeg[ebpfplat.StAllowHit] != beforeNeg[ebpfplat.StAllowHit] {
+		t.Fatalf("未授权 TCP 端口 %d 命中了 allowlist: allow_hit %d → %d",
+			itTCPOtherPort, beforeNeg[ebpfplat.StAllowHit], afterNeg[ebpfplat.StAllowHit])
+	}
+	t.Logf("TCP 负例: 端口 %d 未命中（allow_hit 保持 %d；total %d → %d 证明 hook 活着）",
+		itTCPOtherPort, afterNeg[ebpfplat.StAllowHit], beforeNeg[ebpfplat.StTotal], total[ebpfplat.StTotal])
+
+	// ---- 3) UDP SPA 候选通路未受影响 ----
+	beforeCand := readStats(t, objs)
+	spa := append([]byte("KNOK"), make([]byte, 60)...)
+	sendUDP(t, itSPAPort, spa)
+	pkt := waitEvent(t, src, 3*time.Second)
+	if len(pkt.Payload) < 4 || string(pkt.Payload[:4]) != "KNOK" {
+		t.Fatalf("UDP 候选事件载荷前 4 字节 = %q（want KNOK）", pkt.Payload[:min(4, len(pkt.Payload))])
+	}
+	if pkt.DstPort != itSPAPort {
+		t.Fatalf("UDP 候选事件 DstPort = %d, want %d", pkt.DstPort, itSPAPort)
+	}
+	cand := waitStatAtLeast(t, objs, ebpfplat.StCandidate, beforeCand[ebpfplat.StCandidate]+1, 3*time.Second,
+		"magic UDP 包仍被上送为候选")
+	t.Logf("UDP 回归: magic UDP 到 %d 仍进 ringbuf（candidate %d → %d，载荷前 4 字节 KNOK）",
+		itSPAPort, beforeCand[ebpfplat.StCandidate], cand[ebpfplat.StCandidate])
+
+	// ---- 4) TCP 不得进入 SPA 候选路径（M2 的候选匹配仍是 UDP-only） ----
+	// 在 SPA 端口上放 TCP 监听，建立连接后送一个"magic TCP 载荷"：dport == cfg.spa_port
+	// 且载荷前 4 字节是 KNOK。若把协议门直接删掉、拿 TCP 报文当 UDP 头解析，这条
+	// 报文就会混进 ringbuf 并计入 candidate——这里把它钉死。
+	lnSPA, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(itSPAPort)))
+	if err != nil {
+		t.Fatalf("listen tcp 127.0.0.1:%d: %v", itSPAPort, err)
+	}
+	defer lnSPA.Close()
+
+	beforeTCP := readStats(t, objs)
+	conn2, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(itSPAPort)), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial tcp 127.0.0.1:%d: %v", itSPAPort, err)
+	}
+	if _, err := conn2.Write(spa); err != nil {
+		t.Logf("write magic TCP payload: %v", err)
+	}
+	_ = conn2.Close()
+	waitStatAtLeast(t, objs, ebpfplat.StTotal, beforeTCP[ebpfplat.StTotal]+1, 3*time.Second,
+		"hook 仍在处理 lo 流量")
+	noEvent(t, src, 500*time.Millisecond, "TCP 载荷（dport == cfg.spa_port + magic）")
+	afterTCP := readStats(t, objs)
+	if afterTCP[ebpfplat.StCandidate] != beforeTCP[ebpfplat.StCandidate] {
+		t.Fatalf("TCP 被当成 SPA 候选上送了: candidate %d → %d",
+			beforeTCP[ebpfplat.StCandidate], afterTCP[ebpfplat.StCandidate])
+	}
+	t.Logf("SPA 边界: TCP 载荷到 cfg.spa_port 未上送（candidate 保持 %d，ringbuf 无事件）",
+		afterTCP[ebpfplat.StCandidate])
+
+	// ---- 5) 收尾：不留残留（明细清理断言由 TestDataplaneRoundTrip 覆盖） ----
+	if err := be.Detach(h); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	detachAll(be, ifindex, pinDir)
+	if n := countListed(t, be, pinDir, ifindex); n != 0 {
+		t.Fatalf("收尾后 List 仍找到 %d 个 knok 附着, want 0", n)
+	}
+	if n := countKnokFilters(t, ifindex); n != 0 {
+		t.Fatalf("收尾后 lo 上仍有 %d 个 knok filter, want 0", n)
+	}
+	if be.Kind() == "tcx" {
+		waitLinkGone(t, tcxLinkID, 3*time.Second)
+		if n := countTCXLinks(t); n != baseLinks {
+			t.Fatalf("收尾后 tcx link 数 = %d, want %d", n, baseLinks)
+		}
+	}
+}
 
 func TestDataplaneRoundTrip(t *testing.T) {
 	// MustLoadForTest 走生产路径 LoadObjects（pin 目录 + PinByName 复用），并在
@@ -353,6 +539,21 @@ func waitEvent(t *testing.T, src *ebpfplat.RingbufSource, timeout time.Duration)
 	case <-time.After(timeout):
 		t.Fatalf("ringbuf 在 %s 内没有事件", timeout)
 		return ports.CandidatePacket{}
+	}
+}
+
+// noEvent 断言 timeout 内 ringbuf 没有事件（反向用例用；waitEvent 会在超时 Fatal，
+// 而这里 Fatal 的是"出现了事件"）。
+func noEvent(t *testing.T, src *ebpfplat.RingbufSource, timeout time.Duration, what string) {
+	t.Helper()
+	select {
+	case pkt, ok := <-src.Packets():
+		if !ok {
+			t.Fatal("Packets() 的通道被关闭了")
+		}
+		t.Fatalf("%s 不该进 ringbuf，却收到事件: src=%v dst_port=%d payload=%d 字节",
+			what, pkt.SrcIP, pkt.DstPort, len(pkt.Payload))
+	case <-time.After(timeout):
 	}
 }
 

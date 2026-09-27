@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-// knok M2 数据面：allowlist 打标 + UDP SPA 候选上送。TCP SYN 匹配在 M4 加入。
+// knok M2 数据面：allowlist 打标（UDP 与 TCP 一致）+ UDP SPA 候选上送。
+// TCP SYN 匹配在 M4 加入——M2 的 TCP 只被 allowlist 打标，不做候选匹配。
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
@@ -98,6 +99,10 @@ int knok_ingress(struct __sk_buff *skb)
 
     struct allow_key key = {};
     __u8 ipver;
+    /* M2 的 L4 范围是 UDP 与 TCP：两者都要走 allowlist 打标——受保护的业务端口
+     * 多为 TCP（SSH 就是），拿不到 mark 的 TCP 会被 nftables 的 drop 规则拦掉。
+     * 其它 L4 协议（ICMP 等）原样放行，不参与任何判定。 */
+    __u8 is_udp = 0;
     void *l4;
 
     if (eth->h_proto == bpf_htons(ETH_P_IP)) {
@@ -109,8 +114,9 @@ int knok_ingress(struct __sk_buff *skb)
         __u32 ihl_len = (__u32)iph->ihl * 4;
         if ((void *)iph + ihl_len > data_end)
             return TC_ACT_OK;
-        if (iph->protocol != IPPROTO_UDP)
-            return TC_ACT_OK; /* M2: UDP only */
+        if (iph->protocol != IPPROTO_UDP && iph->protocol != IPPROTO_TCP)
+            return TC_ACT_OK; /* M2: UDP + TCP only */
+        is_udp = iph->protocol == IPPROTO_UDP;
         ipver = 4;
         key.ip[10] = 0xff;
         key.ip[11] = 0xff;
@@ -120,8 +126,9 @@ int knok_ingress(struct __sk_buff *skb)
         struct ipv6hdr *ip6 = (void *)(eth + 1);
         if ((void *)(ip6 + 1) > data_end)
             return TC_ACT_OK;
-        if (ip6->nexthdr != IPPROTO_UDP)
+        if (ip6->nexthdr != IPPROTO_UDP && ip6->nexthdr != IPPROTO_TCP)
             return TC_ACT_OK;
+        is_udp = ip6->nexthdr == IPPROTO_UDP;
         ipver = 6;
         __builtin_memcpy(key.ip, &ip6->saddr, 16);
         l4 = (void *)(ip6 + 1);
@@ -129,12 +136,30 @@ int knok_ingress(struct __sk_buff *skb)
         return TC_ACT_OK;
     }
 
-    struct udphdr *udp = l4;
-    if ((void *)(udp + 1) > data_end)
-        return TC_ACT_OK;
-    key.port = bpf_ntohs(udp->dest);
+    /* L4 解析：按协议各用正确的结构体读目的端口（UDP/TCP 头的前 4 字节布局相同，
+     * 但类型分开写，绝不拿 udphdr 去解释 TCP 头）。每个分支都在自己的边界检查
+     * 之后才解引用，并且只把**标量**带到分支之外——合并点之后不再出现指针，
+     * verifier 无需跨分支推断包内边界。
+     * udp_hdr_len / udp_src 只由 UDP 分支写入，也只被 UDP 的 SPA 候选路径读取。 */
+    __u32 udp_hdr_len = 0;
+    __u16 udp_src = 0;
 
-    /* 1) allowlist：命中且未过期 → 打 mark 放行（全程内核内） */
+    if (is_udp) {
+        struct udphdr *udp = l4;
+        if ((void *)(udp + 1) > data_end)
+            return TC_ACT_OK;
+        key.port = bpf_ntohs(udp->dest);
+        udp_hdr_len = (__u32)((void *)(udp + 1) - data);
+        udp_src = bpf_ntohs(udp->source);
+    } else {
+        struct tcphdr *tcp = l4;
+        if ((void *)(tcp + 1) > data_end)
+            return TC_ACT_OK;
+        key.port = bpf_ntohs(tcp->dest);
+    }
+
+    /* 1) allowlist：命中且未过期 → 打 mark 放行（全程内核内）。TCP 与 UDP 走的是
+     * 同一条路径：受保护端口的业务 TCP（SSH）就靠这里拿到 MARK_KNOK。 */
     __u64 *expiry = bpf_map_lookup_elem(&allowlist, &key);
     if (expiry) {
         if (*expiry > bpf_ktime_get_ns()) {
@@ -146,20 +171,24 @@ int knok_ingress(struct __sk_buff *skb)
         bump(ST_ALLOW_EXPIRY);
     }
 
-    /* 2) SPA 候选：目标端口 == cfg.spa_port 且载荷前 4 字节 == "KNOK" */
+    /* 2) SPA 候选：仅 UDP（M2）。TCP 在 allowlist 之后就直接返回，不做候选匹配，
+     * 因此 cfg.spa_port 只在 UDP 路径上被读取；TCP 报文也不会因为目的端口恰好
+     * 等于 SPA 端口而被上送（TCP SYN 匹配是 M4 的工作）。 */
+    if (!is_udp)
+        return TC_ACT_OK;
+
     __u32 zero = 0;
     struct cfg_val *c = bpf_map_lookup_elem(&cfg, &zero);
     if (!c || key.port != c->spa_port)
         return TC_ACT_OK;
 
-    __u32 hdr_len = (__u32)((void *)(udp + 1) - data);
     __u32 pkt_len = (__u32)(data_end - data);
-    if (pkt_len < hdr_len + 4)
+    if (pkt_len < udp_hdr_len + 4)
         return TC_ACT_OK;
-    __u32 plen = pkt_len - hdr_len;
+    __u32 plen = pkt_len - udp_hdr_len;
 
     __u8 magic[4];
-    if (bpf_skb_load_bytes(skb, hdr_len, magic, sizeof(magic)) < 0)
+    if (bpf_skb_load_bytes(skb, udp_hdr_len, magic, sizeof(magic)) < 0)
         return TC_ACT_OK;
     if (magic[0] != 'K' || magic[1] != 'N' || magic[2] != 'O' || magic[3] != 'K')
         return TC_ACT_OK;
@@ -173,7 +202,7 @@ int knok_ingress(struct __sk_buff *skb)
     /* verifier 提示：bpf_skb_load_bytes 的 size 参数是 ARG_CONST_SIZE，内核要求
      * 长度寄存器的 umin > 0，否则报 "invalid zero-sized read"。copy_len 的下界
      * 来自 map 值 cfg.min_len，verifier 无法证明它 ≥ 1，故这里补一个常量下界
-     * （4 = magic 自身长度）。语义等价：上面的 pkt_len < hdr_len + 4 已保证
+     * （4 = magic 自身长度）。语义等价：上面的 pkt_len < udp_hdr_len + 4 已保证
      * plen ≥ 4，本分支在真实报文上永不触发。
      * 不要删除这一检查——删掉后程序会再次被 verifier 拒绝、加载不进内核。 */
     if (copy_len < 4)
@@ -189,11 +218,11 @@ int knok_ingress(struct __sk_buff *skb)
     e->ipver = ipver;
     e->pad[0] = 0; e->pad[1] = 0; e->pad[2] = 0;
     __builtin_memcpy(e->src_ip, key.ip, 16);
-    e->src_port = bpf_ntohs(udp->source);
+    e->src_port = udp_src;
     e->dst_port = key.port;
     e->payload_len = (__u16)copy_len;
     __builtin_memset(e->payload, 0, MAX_SPA_PKT);
-    if (bpf_skb_load_bytes(skb, hdr_len, e->payload, copy_len) < 0) {
+    if (bpf_skb_load_bytes(skb, udp_hdr_len, e->payload, copy_len) < 0) {
         bpf_ringbuf_discard(e, 0);
         return TC_ACT_OK;
     }
