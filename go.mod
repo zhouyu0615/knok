@@ -9,4 +9,7 @@ require (
 	golang.org/x/sys v0.30.0
 )
 
-require github.com/vishvananda/netns v0.0.4 // indirect
+require (
+	github.com/BurntSushi/toml v1.4.0 // indirect
+	github.com/vishvananda/netns v0.0.4 // indirect
+)
