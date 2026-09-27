@@ -38,8 +38,18 @@ test:
 	else $(GO) test $$dirs; fi
 
 # 架构守护：internal/core 不得 import 平台库
+#
+# `go list` 的**失败**必须与"没有违规依赖"区分开：旧写法 `2>/dev/null` 丢掉了
+# stderr，于是 go.mod 损坏/包加载不了（go list 非零退出、stdout 为空）看起来和
+# "依赖干净"一模一样——架构闸门在仓库最需要它的时候静默失效。现在先判 go list
+# 的退出码，失败就把它的输出打出来并以 1 退出。
 corelint:
-	@deps=$$($(GO) list -deps ./internal/core/... 2>/dev/null | grep -E 'cilium/ebpf|vishvananda/netlink|google/nftables' || true); \
+	@if ! out=$$($(GO) list -deps ./internal/core/... 2>&1); then \
+	  printf '%s\n' "$$out"; \
+	  echo "corelint: go list failed (broken go.mod or unloadable packages)"; \
+	  exit 1; \
+	fi; \
+	deps=$$(printf '%s\n' "$$out" | grep -E 'cilium/ebpf|vishvananda/netlink|google/nftables' || true); \
 	if [ -n "$$deps" ]; then echo "core isolation violation:"; echo "$$deps"; exit 1; fi
 
 # 以下目标仅在 VPS（Linux）上运行
