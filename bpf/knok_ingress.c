@@ -6,6 +6,12 @@
 
 #define TC_ACT_OK 0
 
+/* EtherType 常量：老内核的 vmlinux.h 只导出使用中的枚举成员，ETH_P_IP/ETH_P_IPV6
+ * 不在其中（bpftool 只 dump BTF 里存在的符号）。不能改用 <linux/if_ether.h>（会与
+ * vmlinux.h 的类型定义冲突），故按 IEEE 802 的标准值本地定义。语义与内核 uapi 一致。 */
+#define ETH_P_IP   0x0800
+#define ETH_P_IPV6 0x86DD
+
 #define MARK_KNOK   0x4B4E4F4B
 #define MAX_SPA_PKT 512
 
