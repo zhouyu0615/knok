@@ -170,6 +170,15 @@ int knok_ingress(struct __sk_buff *skb)
     if (copy_len > MAX_SPA_PKT)
         copy_len = MAX_SPA_PKT;
 
+    /* verifier 提示：bpf_skb_load_bytes 的 size 参数是 ARG_CONST_SIZE，内核要求
+     * 长度寄存器的 umin > 0，否则报 "invalid zero-sized read"。copy_len 的下界
+     * 来自 map 值 cfg.min_len，verifier 无法证明它 ≥ 1，故这里补一个常量下界
+     * （4 = magic 自身长度）。语义等价：上面的 pkt_len < hdr_len + 4 已保证
+     * plen ≥ 4，本分支在真实报文上永不触发。
+     * 不要删除这一检查——删掉后程序会再次被 verifier 拒绝、加载不进内核。 */
+    if (copy_len < 4)
+        return TC_ACT_OK;
+
     struct spa_event *e = bpf_ringbuf_reserve(&spa_events, sizeof(*e), 0);
     if (!e) {
         bump(ST_RINGBUF_DROP);
