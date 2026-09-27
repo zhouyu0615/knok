@@ -34,7 +34,11 @@ knok client (any OS)                     knokd (Linux)
 
 ## Status
 
-🚧 **Early development.** Design is settled (see the architecture notes below); the protocol spec, client, and eBPF data plane are being built out. Nothing here is production-ready yet — watch this space.
+🚧 **Early development — M2 milestone reached.** The end-to-end knock flow works
+over UDP on Linux (TCX/TC + nftables): `knok auth` opens the hidden port for a
+bounded TTL and the grant survives a daemon restart. `scripts/e2e.sh`
+(`make e2e`) verifies exactly that against a live kernel. The production crypto
+handshake (Ed25519 + X25519) lands in M3. Nothing here is production-ready yet.
 
 Planned layout:
 
