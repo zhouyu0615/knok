@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 )
 
@@ -42,8 +41,9 @@ func TestPinDir(t *testing.T) string {
 // MustLoadForTest 在测试专属的 pin 目录里加载 knok 的程序与四张 map，并在测试
 // 结束时关闭对象、清掉 pin 目录。
 //
-// 它刻意直接调用 bpf2go 生成的 loadKnokObjects，而不是 Task 7 才会有的
-// LoadObjects（避免本任务依赖未来的文件）。
+// 它走的是生产路径 ebpfplat.LoadObjects（Task 7 起）：集成测试因此顺带验证了
+// "pin 目录 + PinByName 复用"这段真实加载逻辑，而不是另一份只存在于测试里的
+// 加载代码。
 //
 // 生成物里的四张 map 都带 LIBBPF_PIN_BY_NAME（bpf/knok_ingress.c），所以
 // PinPath 必须是 bpffs 下的真实目录；加载前先清掉上一轮失败运行的 pin，
@@ -60,10 +60,8 @@ func MustLoadForTest(t *testing.T) *knokObjects {
 	// 6.8 上不需要，失败也不致命，best-effort 即可。
 	_ = rlimit.RemoveMemlock()
 
-	objs := &knokObjects{}
-	if err := loadKnokObjects(objs, &ebpf.CollectionOptions{
-		Maps: ebpf.MapOptions{PinPath: pinDir},
-	}); err != nil {
+	objs, err := LoadObjects(pinDir)
+	if err != nil {
 		t.Fatalf("load knok objects: %v", err)
 	}
 	t.Cleanup(func() {

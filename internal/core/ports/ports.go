@@ -39,7 +39,16 @@ type Entry struct {
 	Forever   bool
 }
 
+// PacketSource 是数据面候选包的上送口。
 type PacketSource interface {
+	// Packets 返回候选包通道。
+	//
+	// 契约：**每次调用必须返回同一个 channel**。Authenticator.Run 每轮循环都会
+	// 重新调用 Packets()（而不是启动时缓存一次），返回新 channel 会让上一轮已
+	// 读到的事件连同旧 channel 一起被丢弃——表现是候选包随机丢失，而不是报错。
+	//
+	// Close 之后该 channel 可以保持不关闭（消费方以 ctx.Done() 退出）：关闭它会让
+	// 所有后续读取立刻返回零值包，被误判成一个 SrcIP 为 "::" 的坏包。
 	Packets() <-chan CandidatePacket
 	Close() error
 }
