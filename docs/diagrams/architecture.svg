@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 720" width="1120" height="720" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/>
+    </marker>
+    <marker id="arrowDash" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f6feb"/>
+    </marker>
+  </defs>
+
+  <rect width="1120" height="720" fill="#ffffff"/>
+  <text x="24" y="34" font-size="20" font-weight="700" fill="#111">knok 架构（M2）</text>
+  <text x="24" y="56" font-size="13" fill="#555">依赖方向只允许向下 / 向接口：internal/core 的 import 里永不出现 cilium/ebpf、vishvananda/netlink（CI 用 go list 断言）</text>
+
+  <!-- Layer bands -->
+  <rect x="24" y="72" width="700" height="122" rx="6" fill="#f7f8fa" stroke="#c9ced6"/>
+  <text x="36" y="94" font-size="13" font-weight="700" fill="#333">Layer 3 · cmd（组装根）</text>
+  <rect x="40" y="104" width="310" height="76" rx="8" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="56" y="128" font-size="13" font-weight="600" fill="#123">cmd/knok — 客户端 CLI</text>
+  <text x="56" y="148" font-size="11" fill="#234">跨平台纯 Go · knok keygen / auth --exec</text>
+  <text x="56" y="166" font-size="11" fill="#234">发送一个 UDP 包即结束（静默是特性）</text>
+  <rect x="368" y="104" width="330" height="76" rx="8" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="384" y="128" font-size="13" font-weight="600" fill="#123">cmd/knokd — 守护进程（Linux）</text>
+  <text x="384" y="148" font-size="11" fill="#234">启动顺序不变量 [1]→[6]：防火墙最后装</text>
+  <text x="384" y="166" font-size="11" fill="#234">-config / -uninstall / -metrics</text>
+
+  <rect x="24" y="204" width="700" height="122" rx="6" fill="#f7f8fa" stroke="#c9ced6"/>
+  <text x="36" y="226" font-size="13" font-weight="700" fill="#333">Layer 2 · internal/platform（平台适配器，仅 Linux 构建）</text>
+  <rect x="40" y="236" width="310" height="76" rx="8" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="56" y="260" font-size="13" font-weight="600" fill="#123">internal/platform/ebpf</text>
+  <text x="56" y="280" font-size="11" fill="#234">AttachBackend：TCX（≥6.6）⇄ clsact 兜底</text>
+  <text x="56" y="298" font-size="11" fill="#234">RingbufSource · MapAllowlist · maps 加载/pin</text>
+  <rect x="368" y="236" width="330" height="76" rx="8" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="384" y="260" font-size="13" font-weight="600" fill="#123">internal/platform/nftables</text>
+  <text x="384" y="280" font-size="11" fill="#234">inet knok 表：声明式整表替换（幂等）</text>
+  <text x="384" y="298" font-size="11" fill="#234">无 mark → drop（终局）；mark → accept</text>
+
+  <rect x="24" y="336" width="700" height="122" rx="6" fill="#f7f8fa" stroke="#c9ced6"/>
+  <text x="36" y="358" font-size="13" font-weight="700" fill="#333">Layer 1 · internal/core（业务核心，纯 Go，macOS 上可完整单测）</text>
+  <rect x="40" y="368" width="310" height="76" rx="8" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="56" y="392" font-size="13" font-weight="600" fill="#123">internal/core/ports — 六边形端口</text>
+  <text x="56" y="412" font-size="11" fill="#234">PacketSource / Allowlist / Firewall</text>
+  <text x="56" y="430" font-size="11" fill="#234">Clock / AuditSink（core 只认识接口）</text>
+  <rect x="368" y="368" width="330" height="76" rx="8" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="384" y="392" font-size="13" font-weight="600" fill="#123">internal/core/auth — 验证管线</text>
+  <text x="384" y="412" font-size="11" fill="#234">AEAD → 时间窗 → 防重放 → 策略 → TTL 封顶</text>
+  <text x="384" y="430" font-size="11" fill="#234">Authenticator 主循环 + 结构化审计事件</text>
+
+  <rect x="24" y="468" width="700" height="96" rx="6" fill="#f7f8fa" stroke="#c9ced6"/>
+  <text x="36" y="490" font-size="13" font-weight="700" fill="#333">Layer 0 · pkg/protocol（对外公开，零 OS 依赖）</text>
+  <rect x="40" y="500" width="658" height="52" rx="8" fill="#e1d5e7" stroke="#9673a6"/>
+  <text x="56" y="522" font-size="12" font-weight="600" fill="#123">线格式：magic "KNOK" | version | flags | AEAD nonce | 密文 + tag</text>
+  <text x="56" y="540" font-size="11" fill="#234">XChaCha20-Poly1305（M2 为 PSK 模式；Ed25519/X25519 在 M3）· 测试向量固化，供第三方实现对照</text>
+
+  <!-- Kernel column -->
+  <rect x="744" y="72" width="352" height="492" rx="6" fill="#fdf4f4" stroke="#e0b4b4"/>
+  <text x="760" y="94" font-size="13" font-weight="700" fill="#7a2a2a">Linux 内核</text>
+
+  <rect x="760" y="104" width="320" height="140" rx="8" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="774" y="126" font-size="12.5" font-weight="600" fill="#123">TC/TCX ingress 程序（bpf/knok_ingress.c）</text>
+  <text x="774" y="146" font-size="11" fill="#234">1. allowlist 命中且未过期 → skb-&gt;mark = 0x4b4e4f4b</text>
+  <text x="774" y="164" font-size="11" fill="#234">2. magic + 长度区间过滤垃圾包（扫描者无感）</text>
+  <text x="774" y="182" font-size="11" fill="#234">3. UDP SPA 候选包 → ringbuf（零拷贝上送）</text>
+  <text x="774" y="200" font-size="11" fill="#234">4. 过期条目惰性删除（TTL 精度到包）</text>
+  <text x="774" y="222" font-size="11" font-weight="600" fill="#7a2a2a">永不主动丢弃业务流量：只打标，裁决留给 nftables</text>
+
+  <rect x="760" y="256" width="320" height="118" rx="8" fill="#fff2cc" stroke="#d6b656"/>
+  <text x="774" y="278" font-size="12.5" font-weight="600" fill="#123">pinned BPF maps（/sys/fs/bpf/knok）</text>
+  <text x="774" y="298" font-size="11" fill="#234">allowlist：{srcIP, port} → expiry_ns（授权状态）</text>
+  <text x="774" y="316" font-size="11" fill="#234">cfg：spa_port / min_len / max_len</text>
+  <text x="774" y="334" font-size="11" fill="#234">spa_events：ringbuf 512KB · stats：计数器</text>
+  <text x="774" y="356" font-size="11" font-weight="600" fill="#7a2a2a">pin 复用 → knokd 重启不丢已授权状态</text>
+
+  <rect x="760" y="386" width="320" height="118" rx="8" fill="#f8cecc" stroke="#b85450"/>
+  <text x="774" y="408" font-size="12.5" font-weight="600" fill="#123">nftables：inet knok（knokd 独占，绝不碰用户表）</text>
+  <text x="774" y="428" font-size="11" fill="#234">hook input，priority -200，policy accept</text>
+  <text x="774" y="446" font-size="11" fill="#234">meta mark 0x4b4e4f4b accept</text>
+  <text x="774" y="464" font-size="11" fill="#234">tcp dport { 受保护 } drop · udp dport { 受保护 } drop</text>
+  <text x="774" y="482" font-size="11" fill="#234">udp dport SPA 端口 drop（保持静默）</text>
+  <text x="774" y="500" font-size="11" fill="#234">knokd 退出时保留该表（fail-closed）</text>
+
+  <rect x="760" y="516" width="320" height="34" rx="8" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="774" y="538" font-size="11.5" fill="#123">受保护服务（如 sshd :22）— 敲门前不可扫描</text>
+
+  <!-- client + escape hatch -->
+  <rect x="24" y="588" width="700" height="48" rx="8" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="40" y="610" font-size="12" font-weight="600" fill="#123">客户端（任意 OS）</text>
+  <text x="40" y="628" font-size="11" fill="#234">一个 UDP 包：时间戳 + 随机 nonce + 请求端口 / TTL，AEAD 加密（无响应）</text>
+
+  <rect x="744" y="588" width="352" height="48" rx="8" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="760" y="610" font-size="12" font-weight="600" fill="#123">safety.admin_allow — 逃生通道</text>
+  <text x="760" y="628" font-size="11" fill="#234">永久放行；在防火墙之前写入，调试/卸载不会把自己锁在门外</text>
+
+  <!-- arrows -->
+  <path d="M 400 588 L 400 500" stroke="#1f6feb" stroke-width="1.6" stroke-dasharray="5 4" fill="none" marker-end="url(#arrowDash)"/>
+  <text x="408" y="556" font-size="11" fill="#1f6feb">SPA UDP 包（敲门）</text>
+
+  <path d="M 744 170 L 700 300" stroke="#555" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <text x="600" y="230" font-size="11" fill="#555">ringbuf 上送候选包</text>
+  <path d="M 700 340 L 756 300" stroke="#555" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <text x="606" y="336" font-size="11" fill="#555">回写 allowlist / 读 stats</text>
+
+  <path d="M 744 440 L 706 420" stroke="#555" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <text x="608" y="418" font-size="11" fill="#555">整表替换（启动时一次）</text>
+
+  <path d="M 920 386 L 920 364" stroke="#555" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 1000 256 L 1000 248" stroke="#555" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 860 550 L 860 562" stroke="#1f6feb" stroke-width="1.6" fill="none" marker-end="url(#arrowDash)"/>
+  <text x="868" y="566" font-size="11" fill="#1f6feb">mark 匹配 → accept → 握手 → SSH</text>
+
+  <path d="M 744 612 L 700 380" stroke="#82b366" stroke-width="1.4" stroke-dasharray="5 4" fill="none" marker-end="url(#arrow)"/>
+  <text x="640" y="600" font-size="11" fill="#2f6b2f">GrantForever（写 map）</text>
+
+  <text x="24" y="672" font-size="11.5" fill="#555">数据面：TC/TCX 只做「查表打标 + 过滤 + 上送」，裁决由 nftables 表完成 —— 因此 NAT、conntrack 与日志全部保留。</text>
+  <text x="24" y="692" font-size="11.5" fill="#555">控制面：knokd 负责验证与授权状态写入；全程无 fork/exec iptables，无用户态规则扫描。</text>
+  <text x="24" y="712" font-size="11" fill="#888">源文件：docs/diagrams/architecture.drawio（可用 draw.io / VS Code 插件编辑）</text>
+</svg>

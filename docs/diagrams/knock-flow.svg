@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" width="1200" height="900" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#444"/>
+    </marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f6feb"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b85450"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="900" fill="#fff"/>
+  <text x="24" y="32" font-size="19" font-weight="700" fill="#111">knok 主流程时序：一次敲门 → 开门 → TTL 到期自动关闭（M2）</text>
+  <text x="24" y="52" font-size="12" fill="#666">源文件：docs/diagrams/knock-flow.puml（PlantUML，可直接编辑）</text>
+
+  <!-- participants -->
+  <g font-size="12" font-weight="600" fill="#123">
+    <rect x="30" y="66" width="120" height="40" rx="7" fill="#dae8fc" stroke="#6c8ebf"/><text x="46" y="84">客户端 knok</text><text x="46" y="99" font-size="10" font-weight="400">任意 OS</text>
+    <rect x="200" y="66" width="150" height="40" rx="7" fill="#ffe6cc" stroke="#d79b00"/><text x="212" y="84">TC/TCX ingress</text><text x="212" y="99" font-size="10" font-weight="400">knok_ingress.c</text>
+    <rect x="400" y="66" width="130" height="40" rx="7" fill="#d5e8d4" stroke="#82b366"/><text x="418" y="84">knokd</text><text x="418" y="99" font-size="10" font-weight="400">验证管线</text>
+    <rect x="580" y="66" width="150" height="40" rx="7" fill="#fff2cc" stroke="#d6b656"/><text x="592" y="84">allowlist map</text><text x="592" y="99" font-size="10" font-weight="400">{srcIP,port}→expiry</text>
+    <rect x="780" y="66" width="150" height="40" rx="7" fill="#f8cecc" stroke="#b85450"/><text x="792" y="84">nftables inet knok</text><text x="792" y="99" font-size="10" font-weight="400">priority -200</text>
+    <rect x="980" y="66" width="180" height="40" rx="7" fill="#dae8fc" stroke="#6c8ebf"/><text x="992" y="84">受保护服务</text><text x="992" y="99" font-size="10" font-weight="400">sshd :22</text>
+  </g>
+
+  <!-- lifelines -->
+  <g stroke="#b9c0ca" stroke-width="1">
+    <line x1="90" y1="106" x2="90" y2="830"/>
+    <line x1="275" y1="106" x2="275" y2="830"/>
+    <line x1="465" y1="106" x2="465" y2="830"/>
+    <line x1="655" y1="106" x2="655" y2="830"/>
+    <line x1="855" y1="106" x2="855" y2="830"/>
+    <line x1="1070" y1="106" x2="1070" y2="830"/>
+  </g>
+
+  <!-- phase 0 note -->
+  <rect x="30" y="120" width="1130" height="40" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="44" y="139" font-size="11.5" fill="#333">启动前置（见 knok-daemon-startup）：配置 → maps → attach → 授权通路就绪 → admin_allow 逃生通道 → <tspan font-weight="700">最后</tspan>才安装 drop 规则。</text>
+  <text x="44" y="155" font-size="11.5" fill="#333">此刻受保护端口对所有人静默丢弃，只有被授权的源 IP 能通过。</text>
+
+  <!-- phase 1 -->
+  <line x1="30" y1="180" x2="1160" y2="180" stroke="#e4e8ee"/>
+  <text x="34" y="196" font-size="11.5" font-weight="700" fill="#1f6feb">1 · 敲门</text>
+  <path d="M 96 214 h 60" stroke="#444" fill="none" marker-end="url(#a)"/><text x="100" y="208" font-size="10.5" fill="#444">组包：ts + nonce + 端口/TTL，AEAD</text>
+  <path d="M 90 244 L 268 244" stroke="#1f6feb" stroke-width="1.6" fill="none" marker-end="url(#ab)"/>
+  <text x="100" y="238" font-size="11" fill="#1f6feb">UDP → spa_port 4242（敲门包）</text>
+  <path d="M 281 272 h 120" stroke="#444" fill="none" marker-end="url(#a)"/><text x="288" y="266" font-size="10.5" fill="#444">magic "KNOK" + 长度区间校验</text>
+  <text x="288" y="290" font-size="10.5" fill="#999">非候选包（扫描/垃圾）→ 静默丢弃，无任何响应</text>
+  <path d="M 275 312 L 458 312" stroke="#444" fill="none" marker-end="url(#a)"/>
+  <text x="286" y="306" font-size="11" fill="#444">候选包 → ringbuf 上送 spa_event（零拷贝，512KB）</text>
+
+  <!-- phase 2 -->
+  <line x1="30" y1="336" x2="1160" y2="336" stroke="#e4e8ee"/>
+  <text x="34" y="352" font-size="11.5" font-weight="700" fill="#2f6b2f">2 · 验证（成本递增，失败即弃；静默是特性）</text>
+  <path d="M 471 370 h 150" stroke="#444" fill="none" marker-end="url(#a)"/>
+  <text x="478" y="364" font-size="10.5" fill="#444">AEAD 校验 → 时间窗 → 防重放 → 策略 → TTL 封顶</text>
+  <text x="478" y="386" font-size="10.5" fill="#999">失败原因：auth_failed / clock_skew / replay / policy（审计可查）</text>
+  <path d="M 465 408 L 648 408" stroke="#444" fill="none" marker-end="url(#a)"/>
+  <text x="474" y="402" font-size="11" fill="#444">通过 → put {srcIP, port} = now + min(TTL, max_ttl)</text>
+  <rect x="410" y="420" width="560" height="34" rx="5" fill="#fafbfc" stroke="#e1e5ea"/>
+  <text x="420" y="441" font-size="10.5" fill="#666">knokd 从不回复客户端（成功/失败都不回复）。审计：spa_grant / spa_reject → JSON 到 stdout；度量：/metrics。</text>
+
+  <!-- phase 3 -->
+  <line x1="30" y1="470" x2="1160" y2="470" stroke="#e4e8ee"/>
+  <text x="34" y="486" font-size="11.5" font-weight="700" fill="#b85450">3 · 业务流量放行</text>
+  <path d="M 90 512 L 268 512" stroke="#1f6feb" stroke-width="1.6" fill="none" marker-end="url(#ab)"/>
+  <text x="100" y="506" font-size="11" fill="#1f6feb">TCP SYN → :22（--exec 在敲门后 300ms 执行 ssh）</text>
+  <path d="M 281 540 L 648 540" stroke="#444" fill="none" marker-end="url(#a)"/>
+  <text x="292" y="534" font-size="10.5" fill="#444">查 {srcIP, 22}</text>
+  <path d="M 648 566 L 288 566" stroke="#444" fill="none" marker-end="url(#a)"/>
+  <text x="420" y="560" font-size="10.5" fill="#444">命中且未过期 ✓</text>
+  <path d="M 281 594 L 848 594" stroke="#b85450" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+  <text x="330" y="588" font-size="10.5" fill="#b85450">skb-&gt;mark = 0x4b4e4f4b（数据面只打标，不裁决）</text>
+  <path d="M 861 622 L 1063 622" stroke="#b85450" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+  <text x="870" y="616" font-size="10.5" fill="#b85450">mark 匹配 → accept（继续走用户防火墙链）</text>
+  <path d="M 1063 650 L 96 650" stroke="#1f6feb" stroke-width="1.5" stroke-dasharray="5 4" fill="none" marker-end="url(#ab)"/>
+  <text x="500" y="644" font-size="10.5" fill="#1f6feb">SSH 会话建立（此后由 sshd 自身的认证与加密接管）</text>
+
+  <!-- phase 4 -->
+  <line x1="30" y1="680" x2="1160" y2="680" stroke="#e4e8ee"/>
+  <text x="34" y="696" font-size="11.5" font-weight="700" fill="#666">4 · TTL 到期</text>
+  <path d="M 90 722 L 268 722" stroke="#1f6feb" stroke-width="1.6" fill="none" marker-end="url(#ab)"/>
+  <text x="100" y="716" font-size="11" fill="#1f6feb">后续包 → :22</text>
+  <path d="M 281 750 L 648 750" stroke="#444" fill="none" marker-end="url(#a)"/>
+  <text x="292" y="744" font-size="10.5" fill="#444">查 {srcIP, 22}</text>
+  <path d="M 648 776 L 288 776" stroke="#444" fill="none" marker-end="url(#a)"/>
+  <text x="392" y="770" font-size="10.5" fill="#444">已过期 → 惰性删除条目（内核内，无需扫描）</text>
+  <path d="M 281 802 L 848 802" stroke="#b85450" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+  <text x="330" y="796" font-size="10.5" fill="#b85450">不打 mark</text>
+  <path d="M 848 828 L 288 828" stroke="#b85450" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+  <text x="420" y="822" font-size="10.5" fill="#b85450">无 mark → drop（终局裁决）：端口重新对外隐身</text>
+
+  <text x="30" y="866" font-size="11" fill="#888">到期精度到包：过期由数据路径内联判断，既没有用户态定时扫描，也不需要删除防火墙规则。</text>
+  <text x="30" y="884" font-size="11" fill="#888">已知限制：M2 的 nonce 缓存在进程内存中，knokd 重启后 ts_window 内仍可能重放（M3 落到 pinned/持久化存储）。</text>
+</svg>

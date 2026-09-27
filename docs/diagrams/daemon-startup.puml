@@ -1,0 +1,30 @@
+@startuml knok-daemon-startup
+autonumber
+title knokd 启动顺序不变量（安全前提：防火墙是最后一条腿）
+
+participant "run()" as R
+database "pinned maps\n/sys/fs/bpf/knok" as M
+participant "TC/TCX ingress" as TC
+participant "ringbuf + 验证管线" as A
+database "allowlist" as AL
+participant "nftables inet knok" as NFT
+participant "日志 / 运维" as LOG
+
+R -> R : [1] 读配置 + 密钥\n失败 → exit 2，不动任何内核状态
+R -> M : [2] 加载/复用 pinned maps（重启保授权状态）
+M --> R : ok
+R -> TC : [3] attach 到配置的每个网卡（TCX ≥6.6，clsact 兜底）
+TC --> R : ok（失败不回滚：附着本身不丢包）
+R -> A : [4] 启动 ringbuf 消费者 + 验证管线\n（此刻"敲门能开门"成立）
+A --> R : ok
+R -> AL : [5] 写 safety.admin_allow 永久放行（逃生通道）
+AL --> R : ok
+note over R : 信号闸门：ctx 已取消 → 此处返回非零\n宁可"没有装规则"，也不要"门锁了、钥匙服务已停"
+R -> NFT : [6] 最后一步：安装受保护端口的 drop 规则
+NFT --> R : ok
+R -> LOG : firewall installed
+note over R, NFT
+  此前任何失败都在 [6] 之前返回 → **fail-open**（机器与没装 knok 时一样）
+  运行期崩溃/退出 → eBPF 附着与 nftables 表都保留 → **fail-closed**
+end note
+@enduml

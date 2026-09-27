@@ -1,0 +1,64 @@
+@startuml knok-knock-flow
+autonumber
+title knok 主流程：一次敲门 → 开门 → TTL 到期关闭（M2）
+
+actor "客户端 knok" as C
+participant "TC/TCX ingress\nbpf/knok_ingress.c" as TC
+participant "knokd\nringbuf + 验证管线" as KD
+database "allowlist map\n{srcIP,port} → expiry_ns" as AL
+participant "nftables inet knok\nhook input, priority -200" as NFT
+participant "受保护服务\n(sshd :22)" as SVC
+
+note over KD, NFT
+  启动前置（见 knok-daemon-startup）：配置 → maps → attach →
+  授权通路就绪 → admin_allow 逃生通道 → **最后**才安装 drop 规则
+end note
+
+== 1. 敲门（客户端 → 数据面） ==
+C -> C : 组包：ts + random nonce + 请求端口/TTL\nXChaCha20-Poly1305（M2 为 PSK）
+C -> TC : UDP → spa_port 4242
+activate TC
+TC -> TC : magic "KNOK" + 长度区间校验
+alt 非候选包（扫描 / 垃圾）
+  TC --> C : 静默丢弃（无任何响应，端口不可被发现）
+else 候选包
+  TC -> KD : ringbuf 上送 spa_event（零拷贝，512KB）
+end
+deactivate TC
+
+== 2. 验证（成本递增，失败即弃） ==
+activate KD
+KD -> KD : AEAD 校验失败 → auth_failed
+KD -> KD : |ts - now| > ts_window → clock_skew
+KD -> KD : nonce 已见过 → replay
+KD -> KD : 请求端口 ⊄ allowed_ports → policy
+KD -> AL : 全部通过 → put {srcIP, port} = now + min(TTL, max_ttl)
+deactivate KD
+note right of KD
+  静默是特性：成功不回复，失败也不回复
+  审计事件：spa_grant / spa_reject（JSON → stdout）
+  已知限制：nonce 在内存，重启后窗口期内可重放（M3 落 pinned 存储）
+end note
+
+== 3. 业务流量放行（敲门后 300ms，--exec ssh） ==
+C -> TC : TCP SYN → :22
+activate TC
+TC -> AL : 查 {srcIP, 22}
+AL --> TC : 命中且未过期
+TC -> NFT : skb->mark = 0x4b4e4f4b
+TC -> SVC : TC_ACT_OK（放行到协议栈）
+deactivate TC
+activate NFT
+NFT -> NFT : mark 匹配 → accept（继续走用户防火墙链）
+NFT -> SVC : 完成三次握手
+deactivate NFT
+SVC --> C : SSH 会话
+
+== 4. TTL 到期 ==
+C -> TC : 后续包 → :22
+TC -> AL : 查 {srcIP, 22}
+AL --> TC : 已过期 → 惰性删除条目
+TC -> NFT : 不打 mark
+NFT --> C : 无 mark → drop（终局裁决）
+note over TC, NFT : 到期精度到包：无用户态扫描、无需删规则
+@enduml
